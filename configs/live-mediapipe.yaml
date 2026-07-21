@@ -1,0 +1,20 @@
+model_name: ./model_zoo/lam_models/releases/lam/lam-20k/step_045500/
+source_size: 512
+render_size: 512
+
+camera:
+  camera_id: 0
+  width: 640
+  height: 480
+  fps: 30
+
+mediapipe:
+  model_path: model_zoo/mediapipe/face_landmarker.task
+
+live:
+  device: cuda
+  smoothing_alpha: 0.45
+  render_fps: 30
+  use_cached_avatar: true
+  use_head_rotation: false
+  use_translation: false

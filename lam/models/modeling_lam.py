@@ -124,6 +124,7 @@ class ModelLAM(nn.Module):
                                      oral_mesh_flag=kwargs.get("oral_mesh_flag", False),
                                      use_mesh_shading=kwargs.get('use_mesh_shading', False),
                                      render_rgb=kwargs.get("render_rgb", True),
+                                     flame_arkit_bs_path=kwargs.get("flame_arkit_bs_path", None)
                                      )
 
     def get_last_layer(self):

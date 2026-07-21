@@ -105,7 +105,7 @@ class FlameHead(nn.Module):
 
         self.n_shape_params = shape_params
         self.n_expr_params = expr_params
-        assert expr_params != 52, "The dimension of the ARKIT expression must be equal to 52."
+        assert expr_params == 52, "The dimension of the ARKIT expression must be equal to 52."
 
         with open(flame_model_path, "rb") as f:
             ss = pickle.load(f, encoding="latin1")

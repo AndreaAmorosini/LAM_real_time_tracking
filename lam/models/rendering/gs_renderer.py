@@ -29,6 +29,7 @@ import math
 import copy
 from diffusers.utils import is_torch_version
 from lam.models.rendering.flame_model.flame import FlameHeadSubdivided
+from lam.models.rendering.flame_model.flame_arkit import FlameHeadSubdivided as FlameHeadARKITSubdivided
 from lam.models.transformer import TransformerDecoder
 from pytorch3d.transforms import matrix_to_quaternion
 from lam.models.rendering.utils.typing import *
@@ -434,7 +435,7 @@ class GS3DRenderer(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.skip_decoder = skip_decoder
         self.smpl_type = smpl_type
-        assert self.smpl_type == "flame"
+        assert self.smpl_type in ["flame", "flame_arkit"]
         self.sym_rend2 = True
         self.teeth_bs_flag = teeth_bs_flag
         self.oral_mesh_flag = oral_mesh_flag
@@ -448,19 +449,38 @@ class GS3DRenderer(nn.Module):
 
         use_rgb = use_rgb
 
-        self.flame_model = FlameHeadSubdivided(
-            300,
-            100,
-            add_teeth=add_teeth,
-            add_shoulder=False,
-            flame_model_path=f'{human_model_path}/flame_assets/flame/flame2023.pkl',
-            flame_lmk_embedding_path=f"{human_model_path}/flame_assets/flame/landmark_embedding_with_eyes.npy",
-            flame_template_mesh_path=f"{human_model_path}/flame_assets/flame/head_template_mesh.obj",
-            flame_parts_path=f"{human_model_path}/flame_assets/flame/FLAME_masks.pkl",
-            subdivide_num=subdivide_num,
-            teeth_bs_flag=teeth_bs_flag,
-            oral_mesh_flag=oral_mesh_flag
-        )
+        if self.smpl_type == "flame_arkit":
+            flame_arkit_bs_path = kwargs.get("flame_arkit_bs_path", None)
+
+            if flame_arkit_bs_path is None:
+                flame_arkit_bs_path = f"{human_model_path}/flame_assets/flame/flame_arkit_bs.npy"
+
+            self.flame_model = FlameHeadARKITSubdivided(
+                300,
+                52,
+                add_teeth=add_teeth,
+                add_shoulder=False,
+                flame_model_path=f'{human_model_path}/flame_assets/flame/flame2023.pkl',
+                flame_lmk_embedding_path=f"{human_model_path}/flame_assets/flame/landmark_embedding_with_eyes.npy",
+                flame_template_mesh_path=f"{human_model_path}/flame_assets/flame/head_template_mesh.obj",
+                flame_parts_path=f"{human_model_path}/flame_assets/flame/FLAME_masks.pkl",
+                subdivide_num=subdivide_num,
+                flame_arkit_bs_path=flame_arkit_bs_path
+            )
+        else:
+            self.flame_model = FlameHeadSubdivided(
+                300,
+                100,
+                add_teeth=add_teeth,
+                add_shoulder=False,
+                flame_model_path=f'{human_model_path}/flame_assets/flame/flame2023.pkl',
+                flame_lmk_embedding_path=f"{human_model_path}/flame_assets/flame/landmark_embedding_with_eyes.npy",
+                flame_template_mesh_path=f"{human_model_path}/flame_assets/flame/head_template_mesh.obj",
+                flame_parts_path=f"{human_model_path}/flame_assets/flame/FLAME_masks.pkl",
+                subdivide_num=subdivide_num,
+                teeth_bs_flag=teeth_bs_flag,
+                oral_mesh_flag=oral_mesh_flag
+            )
 
         if not self.skip_decoder:
             self.pcl_embed = PointEmbed(dim=query_dim)
