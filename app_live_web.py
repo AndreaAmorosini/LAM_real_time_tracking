@@ -1,3 +1,5 @@
+import os
+import uuid
 import asyncio
 import base64
 import json
@@ -7,19 +9,24 @@ import contextlib
 import cv2
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from lam.live.live_motion import LiveMotionProvider
 from lam.live.debug_draw import draw_face_landmarks, draw_blendshape_debug
 from lam.live.lam_live_renderer import LAMLiveRenderer
 from lam.live.retargeting.mediapipe_to_flame import MediaPipeToFlameAdapter
 from lam.live.source_preprocessor import LAMSourcePreprocessor
+from lam.live.oac_exporter import export_oac_zip_from_live_renderer, safe_avatar_id
 from vhap.model import flame
 
 
 app = FastAPI()
-
+os.makedirs("output/open_avatar_chat", exist_ok=True)
+os.makedirs("webgl_frontend/dist", exist_ok=True)
+app.mount("/oac_assets", StaticFiles(directory="output/open_avatar_chat"), name="oac_assets")
+app.mount("/webgl", StaticFiles(directory="webgl_frontend/dist", html=True), name="webgl")
 
 HTML = """
 <!doctype html>
@@ -177,6 +184,7 @@ HTML = """
         <select id="output_mode">
           <option value="debug">MediaPipe Debug</option>
           <option value="lam">LAM Render</option>
+          <option value="webgl">WebGL Avatar</option>
         </select>
       </div>
 
@@ -278,6 +286,298 @@ HTML = """
 </html>
 """
 
+ARKIT_BLENDSHAPE_NAMES = [
+    "browDownLeft",
+    "browDownRight",
+    "browInnerUp",
+    "browOuterUpLeft",
+    "browOuterUpRight",
+    "cheekPuff",
+    "cheekSquintLeft",
+    "cheekSquintRight",
+    "eyeBlinkLeft",
+    "eyeBlinkRight",
+    "eyeLookDownLeft",
+    "eyeLookDownRight",
+    "eyeLookInLeft",
+    "eyeLookInRight",
+    "eyeLookOutLeft",
+    "eyeLookOutRight",
+    "eyeLookUpLeft",
+    "eyeLookUpRight",
+    "eyeSquintLeft",
+    "eyeSquintRight",
+    "eyeWideLeft",
+    "eyeWideRight",
+    "jawForward",
+    "jawLeft",
+    "jawOpen",
+    "jawRight",
+    "mouthClose",
+    "mouthDimpleLeft",
+    "mouthDimpleRight",
+    "mouthFrownLeft",
+    "mouthFrownRight",
+    "mouthFunnel",
+    "mouthLeft",
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthPressLeft",
+    "mouthPressRight",
+    "mouthPucker",
+    "mouthRight",
+    "mouthRollLower",
+    "mouthRollUpper",
+    "mouthShrugLower",
+    "mouthShrugUpper",
+    "mouthSmileLeft",
+    "mouthSmileRight",
+    "mouthStretchLeft",
+    "mouthStretchRight",
+    "mouthUpperUpLeft",
+    "mouthUpperUpRight",
+    "noseSneerLeft",
+    "noseSneerRight",
+    "tongueOut",
+]
+
+def postprocess_webgl_blendshapes(b):
+    keep = {
+        # Jaw
+        "jawOpen",
+        "jawLeft",
+        "jawRight",
+
+        # Mouth core
+        "mouthSmileLeft",
+        "mouthSmileRight",
+        "mouthFrownLeft",
+        "mouthFrownRight",
+        "mouthPucker",
+        "mouthFunnel",
+
+        # Mouth corners / expressivity
+        "mouthStretchLeft",
+        "mouthStretchRight",
+        "mouthDimpleLeft",
+        "mouthDimpleRight",
+        "mouthLeft",
+        "mouthRight",
+
+        # Lips vertical
+        "mouthLowerDownLeft",
+        "mouthLowerDownRight",
+        "mouthUpperUpLeft",
+        "mouthUpperUpRight",
+
+        # Eyes
+        "eyeBlinkLeft",
+        "eyeBlinkRight",
+        "eyeSquintLeft",
+        "eyeSquintRight",
+        "eyeWideLeft",
+        "eyeWideRight",
+
+        # Brows
+        "browInnerUp",
+        "browOuterUpLeft",
+        "browOuterUpRight",
+        "browDownLeft",
+        "browDownRight",
+
+        # Nose
+        "noseSneerLeft",
+        "noseSneerRight",
+
+        # Cheeks / zigomi
+        "cheekSquintLeft",
+        "cheekSquintRight",
+        "cheekPuff",
+        "mouthCheekPuff",
+    }
+
+    for k in list(b.keys()):
+        if k not in keep:
+            b[k] = 0.0
+
+    deadzones = {
+        # Mouth: lower deadzone for corners
+        "jawOpen": 0.035,
+        "jawLeft": 0.05,
+        "jawRight": 0.05,
+
+        "mouthSmileLeft": 0.025,
+        "mouthSmileRight": 0.025,
+        "mouthFrownLeft": 0.035,
+        "mouthFrownRight": 0.035,
+        "mouthPucker": 0.045,
+        "mouthFunnel": 0.045,
+
+        "mouthStretchLeft": 0.025,
+        "mouthStretchRight": 0.025,
+        "mouthDimpleLeft": 0.025,
+        "mouthDimpleRight": 0.025,
+        "mouthLeft": 0.04,
+        "mouthRight": 0.04,
+
+        "mouthLowerDownLeft": 0.035,
+        "mouthLowerDownRight": 0.035,
+        "mouthUpperUpLeft": 0.035,
+        "mouthUpperUpRight": 0.035,
+
+        # Eyes
+        "eyeBlinkLeft": 0.02,
+        "eyeBlinkRight": 0.02,
+        "eyeSquintLeft": 0.03,
+        "eyeSquintRight": 0.03,
+        "eyeWideLeft": 0.035,
+        "eyeWideRight": 0.035,
+
+        # Brows: lower threshold so they can appear
+        "browInnerUp": 0.02,
+        "browOuterUpLeft": 0.02,
+        "browOuterUpRight": 0.02,
+        "browDownLeft": 0.025,
+        "browDownRight": 0.025,
+
+        # Nose / cheeks: lower threshold because MediaPipe often outputs small values
+        "noseSneerLeft": 0.02,
+        "noseSneerRight": 0.02,
+        "cheekSquintLeft": 0.025,
+        "cheekSquintRight": 0.025,
+        "cheekPuff": 0.04,
+        "mouthCheekPuff": 0.04,
+    }
+
+    for k, dz in deadzones.items():
+        if abs(b.get(k, 0.0)) < dz:
+            b[k] = 0.0
+
+    gains = {
+        # Jaw
+        "jawOpen": 0.95,
+        "jawLeft": 0.75,
+        "jawRight": 0.75,
+
+        # Mouth core
+        "mouthSmileLeft": 1.45,
+        "mouthSmileRight": 1.45,
+        "mouthFrownLeft": 1.05,
+        "mouthFrownRight": 1.05,
+        "mouthPucker": 0.85,
+        "mouthFunnel": 0.85,
+
+        # Mouth corners
+        "mouthStretchLeft": 1.35,
+        "mouthStretchRight": 1.35,
+        "mouthDimpleLeft": 1.25,
+        "mouthDimpleRight": 1.25,
+        "mouthLeft": 0.90,
+        "mouthRight": 0.90,
+
+        # Lips vertical
+        "mouthLowerDownLeft": 0.90,
+        "mouthLowerDownRight": 0.90,
+        "mouthUpperUpLeft": 0.95,
+        "mouthUpperUpRight": 0.95,
+
+        # Eyes
+        "eyeBlinkLeft": 1.25,
+        "eyeBlinkRight": 1.25,
+        "eyeSquintLeft": 1.00,
+        "eyeSquintRight": 1.00,
+        "eyeWideLeft": 1.00,
+        "eyeWideRight": 1.00,
+
+        # Brows: boost visibly
+        "browInnerUp": 2.00,
+        "browOuterUpLeft": 2.00,
+        "browOuterUpRight": 2.00,
+        "browDownLeft": 1.60,
+        "browDownRight": 1.60,
+
+        # Nose / cheeks
+        "noseSneerLeft": 2.00,
+        "noseSneerRight": 2.00,
+        "cheekSquintLeft": 1.50,
+        "cheekSquintRight": 1.50,
+        "cheekPuff": 0.85,
+        "mouthCheekPuff": 0.85,
+    }
+
+    for k, g in gains.items():
+        b[k] = b.get(k, 0.0) * g
+
+    # Workaround: noseSneer is often not visible on the Gaussian avatar.
+    # Remap it to cheeks/zigomi and slight eye squint for a visible sneer-like effect.
+    nose_l = b.get("noseSneerLeft", 0.0)
+    nose_r = b.get("noseSneerRight", 0.0)
+    
+    b["cheekSquintLeft"] = max(
+        b.get("cheekSquintLeft", 0.0),
+        nose_l * 1.2,
+    )
+    b["cheekSquintRight"] = max(
+        b.get("cheekSquintRight", 0.0),
+        nose_r * 1.2,
+    )
+    
+    b["eyeSquintLeft"] = max(
+        b.get("eyeSquintLeft", 0.0),
+        nose_l * 0.35,
+    )
+    b["eyeSquintRight"] = max(
+        b.get("eyeSquintRight", 0.0),
+        nose_r * 0.35,
+    )
+
+    b["mouthCheekPuff"] = max(
+        b.get("mouthCheekPuff", 0.0),
+        b.get("cheekPuff", 0.0),
+    )
+
+    # Keep conflicts controlled but not too destructive.
+    if b.get("jawOpen", 0.0) > 0.10:
+        b["mouthPucker"] *= 0.75
+        b["mouthFunnel"] *= 0.75
+
+    # Pucker/funnel: reduce weaker one, don't zero it completely.
+    if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
+        b["mouthFunnel"] *= 0.55
+    else:
+        b["mouthPucker"] *= 0.55
+
+    for k in list(b.keys()):
+        b[k] = float(max(0.0, min(1.0, b[k])))
+
+    return b
+
+
+
+def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: float):
+    blendshapes = {name: 0.0 for name in ARKIT_BLENDSHAPE_NAMES}
+
+    if tracking is not None and tracking.detected:
+        for name, value in tracking.blendshapes.items():
+            if name in blendshapes:
+                blendshapes[name] = float(value)
+
+    blendshapes["mouthCheekPuff"] = blendshapes.get("cheekPuff", 0.0)
+    blendshapes = postprocess_webgl_blendshapes(blendshapes)
+
+    facial_matrix = None
+    if tracking is not None and tracking.facial_matrix is not None:
+        facial_matrix = tracking.facial_matrix.tolist()
+
+    return {
+        "type": "webgl_frame",
+        "detected": bool(tracking is not None and tracking.detected),
+        "blendshapes": blendshapes,
+        "facial_matrix": facial_matrix,
+        "fps_capture": fps_capture,
+        "fps_sent": fps_sent,
+        "status": status,
+    }
 
 @app.get("/")
 def index():
@@ -402,6 +702,81 @@ async def client_requested_stop(websocket: WebSocket) -> bool:
         return False
 
 
+@app.post("/api/oac/export")
+async def export_oac_from_image(
+    image: UploadFile = File(...),
+    blender_path: Optional[str] = Form(None),
+):
+    upload_dir = "output/live_uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    if not blender_path or blender_path.strip() in ["", "/path/to/blender"]:
+        blender_path = os.environ.get("LAM_BLENDER_PATH", "blender")
+
+    ext = os.path.splitext(image.filename or "")[1].lower()
+    if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
+        ext = ".png"
+
+    avatar_id = safe_avatar_id(image.filename or f"avatar_{uuid.uuid4().hex[:8]}")
+    avatar_id = f"{avatar_id}_{uuid.uuid4().hex[:8]}"
+
+    raw_image_path = os.path.join(upload_dir, avatar_id + ext)
+
+    with open(raw_image_path, "wb") as f:
+        f.write(await image.read())
+
+    preprocessor = LAMSourcePreprocessor(
+        output_dir="tracking_output_live",
+        detect_iris_landmarks=True,
+    )
+
+    processed_source_image_path = await asyncio.to_thread(
+        preprocessor.preprocess,
+        raw_image_path,
+    )
+
+    lam_renderer = LAMLiveRenderer(
+        config_path="configs/inference/lam-20k-8gpu.yaml",
+        model_name="./model_zoo/lam_models/releases/lam/lam-20k/step_045500/",
+        device="cuda",
+        render_size=512,
+    )
+
+    await asyncio.to_thread(lam_renderer.load_model)
+    await asyncio.to_thread(lam_renderer.prepare_source_image, processed_source_image_path)
+
+    source_betas = lam_renderer.get_source_betas_cpu()
+
+    class NeutralTracking:
+        detected = True
+        blendshapes = {}
+        facial_matrix = None
+
+    neutral_adapter = MediaPipeToFlameAdapter(device="cuda", expr_dim=100)
+    neutral_params = neutral_adapter.to_flame_params(
+        NeutralTracking(),
+        source_betas,
+    )
+
+    await asyncio.to_thread(lam_renderer.build_avatar_once, neutral_params)
+
+    zip_path = await asyncio.to_thread(
+        export_oac_zip_from_live_renderer,
+        lam_renderer,
+        avatar_id,
+        blender_path,
+    )
+
+    zip_name = os.path.basename(zip_path)
+
+    return {
+        "avatar_id": avatar_id,
+        "zip_path": zip_path,
+        "asset_url": f"/oac_assets/{zip_name}",
+        "webgl_url": f"/webgl/?asset=/oac_assets/{zip_name}",
+    }
+
+
 @app.websocket("/ws/live")
 async def live_ws(websocket: WebSocket):
     await websocket.accept()
@@ -427,12 +802,7 @@ async def live_ws(websocket: WebSocket):
         lam_config_path = "configs/inference/lam-20k-8gpu.yaml"
         expr_dim = 100
 
-    if output_mode not in ["debug", "lam"]:            
-    # if output_mode == "lam" and flame_params is not None:
-    #     flame_params["jaw_pose"][0, 0, 0] = 1.0
-    #     flame_params["rotation"][0, 0, 1] = 0.45
-    #     flame_params["neck_pose"][0, 0, 1] = 0.15
-
+    if output_mode not in ["debug", "lam", "webgl"]:            
         output_mode = "debug"
 
     ui_fps = max(1.0, min(ui_fps, 60.0))
@@ -463,7 +833,8 @@ async def live_ws(websocket: WebSocket):
             width=320,
             height=240,
             fps=30,
-            expr_dim=expr_dim
+            expr_dim=expr_dim,
+            # smoothing_alpha=0.20
         )
         provider.open()
 
@@ -569,6 +940,38 @@ async def live_ws(websocket: WebSocket):
 
             last_sent = now
 
+            if output_mode == "webgl":
+                status = build_status(
+                    ok=ok,
+                    fps_capture=fps_capture,
+                    fps_sent=fps_sent,
+                    flame_params=flame_params,
+                    tracking=tracking,
+                    output_mode=output_mode
+                )
+
+                payload = build_webgl_payload(
+                    tracking=tracking,
+                    status=status,
+                    fps_capture=fps_capture,
+                    fps_sent=fps_sent,
+                )
+
+                send_ok = await safe_send_json(websocket, payload)
+                if not send_ok:
+                    print("[STREAM] client disconnected, stopping loop")
+                    break
+
+                sent_count += 1
+                now = time.time()
+                if now - t_sent >= 1.0:
+                    fps_sent = sent_count / (now - t_sent)
+                    sent_count = 0
+                    t_sent = now
+
+                await asyncio.sleep(0)
+                continue
+
             if output_mode == "lam" and lam_renderer is not None and ok and flame_params is not None:
                 try:
                     render_t0 = time.time()
@@ -620,12 +1023,6 @@ async def live_ws(websocket: WebSocket):
             )
 
             debug_bgr = cv2.cvtColor(debug, cv2.COLOR_RGB2BGR)
-
-            # success, jpg = cv2.imencode(
-            #     ".jpg",
-            #     debug_bgr,
-            #     [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
-            # )
 
             encode_t0 = time.time()
             success, jpg = await asyncio.to_thread(

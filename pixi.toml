@@ -18,6 +18,7 @@ make = "*"
 ffmpeg = "*"
 zip = "*"
 unzip = "*"
+nodejs="*"
 
 # Toolchain utile per compilare pytorch3d, nvdiffrast, simple-knn e diff-gaussian-rasterization
 gcc_linux-64 = "11.*"
@@ -125,6 +126,7 @@ python -m pip install opencv-python==4.11.0.86
 python -m pip install --force-reinstall "numpy==1.23.0"
 """
 
+
 test-source-preprocess = """
 bash -lc '
 export CUDA_HOME="$CONDA_PREFIX"
@@ -142,6 +144,7 @@ app-live-opencv = "PYTHONPATH=. python -m lam.live.apps.opencv_debug"
 
 app-live-web = """
 bash -lc '
+export LAM_BLENDER_PATH="$PWD/thirdparties/blender/blender-4.0.2-linux-x64/blender"
 export CUDA_HOME="$CONDA_PREFIX"
 export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPATH:-}"
 export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
@@ -152,3 +155,19 @@ export TORCH_CUDA_ARCH_LIST="8.9"
 PYTHONPATH=. python app_live_web.py
 '
 """
+
+
+# ------------------------- NEW VERSION WITH WEB GL --------------------------------
+
+install-fbx-sdk = """
+wget -O /tmp/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl https://virutalbuy-public.oss-cn-hangzhou.aliyuncs.com/share/aigc3d/data/LAM/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl
+python -m pip install /tmp/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl
+"""
+
+setup-blender = "bash scripts/setup-blender.sh"
+
+check-blender = "thirdparties/blender/blender-4.0.2-linux-x64/blender --version"
+
+webgl-install = "npm --prefix webgl_frontend install"
+webgl-dev = "npm --prefix webgl_frontend run dev --host 127.0.0.1 --port 5173"
+webgl-build = "npm --prefix webgl_frontend run build"

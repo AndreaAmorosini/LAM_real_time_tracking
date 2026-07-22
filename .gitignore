@@ -10,3 +10,37 @@ pretrain_model/
 pretrained_models/
 model_zoo/
 tracking_output/
+thirdparties/
+
+# Pixi/local env
+.pixi/
+
+# Python/CUDA build caches
+.torch_extensions/
+*.o
+*.pyc
+__pycache__/
+
+# Node
+node_modules/
+webgl_frontend/node_modules/
+webgl_frontend/dist/
+
+# Runtime outputs
+output/
+tracking_output_live/
+tracking_output/
+inputs_test/
+
+# Downloaded model/assets
+model_zoo/
+thirdparties/
+sample_oac.tar
+assets/sample_oac/
+
+# Local debug files
+bone_names_filtered.txt
+
+# Generated native build artifacts
+external/landmark_detection/FaceBoxesV2/utils/build/
+external/landmark_detection/FaceBoxesV2/utils/nms/*.so

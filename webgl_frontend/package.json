@@ -1,0 +1,17 @@
+{
+  "name": "lam-webgl-live",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "gaussian-splat-renderer-for-lam": "^0.0.9-alpha.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
+  },
+  "devDependencies": {}
+}
