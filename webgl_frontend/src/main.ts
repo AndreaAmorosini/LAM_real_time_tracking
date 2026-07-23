@@ -131,7 +131,38 @@ const avatarEl = getRequiredElement<HTMLDivElement>("avatar");
 const statusEl = getRequiredElement<HTMLPreElement>("status");
 const photoInput = getRequiredElement<HTMLInputElement>("photoInput");
 const createBtn = getRequiredElement<HTMLButtonElement>("createBtn");
-const blenderPathInput = getRequiredElement<HTMLInputElement>("blenderPathInput");
+const blenderPathInput = document.getElementById("blenderPathInput") as HTMLInputElement | null;
+const mappingModeSelect = getRequiredElement<HTMLSelectElement>("mappingModeSelect");
+
+mappingModeSelect.onchange = () => {
+  const mode = mappingModeSelect.value || "stable";
+
+  appendStatus(`Mapping mode changed to: ${mode}`);
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "set_mapping_mode",
+      mapping_mode: mode,
+    }));
+  }
+};
+
+const debugEnableInput = getRequiredElement<HTMLInputElement>("debugEnableInput");
+const debugAdditiveInput = getRequiredElement<HTMLInputElement>("debugAdditiveInput");
+const debugBlendshapeSelect = getRequiredElement<HTMLSelectElement>("debugBlendshapeSelect");
+const debugBlendshapeValue = getRequiredElement<HTMLInputElement>("debugBlendshapeValue");
+const debugBlendshapeValueLabel = getRequiredElement<HTMLSpanElement>("debugBlendshapeValueLabel");
+const debugResetBlendshapeBtn = getRequiredElement<HTMLButtonElement>("debugResetBlendshapeBtn");
+
+const debugBoneSelect = getRequiredElement<HTMLSelectElement>("debugBoneSelect");
+const debugBoneRotX = getRequiredElement<HTMLInputElement>("debugBoneRotX");
+const debugBoneRotY = getRequiredElement<HTMLInputElement>("debugBoneRotY");
+const debugBoneRotZ = getRequiredElement<HTMLInputElement>("debugBoneRotZ");
+const debugBoneRotXLabel = getRequiredElement<HTMLSpanElement>("debugBoneRotXLabel");
+const debugBoneRotYLabel = getRequiredElement<HTMLSpanElement>("debugBoneRotYLabel");
+const debugBoneRotZLabel = getRequiredElement<HTMLSpanElement>("debugBoneRotZLabel");
+const debugResetBoneBtn = getRequiredElement<HTMLButtonElement>("debugResetBoneBtn");
+
 
 let latestBlendshapes: BlendshapeMap = makeNeutralBlendshapes();
 let latestHeadMatrix: number[][] | null = null;
@@ -141,6 +172,137 @@ let patchedMixer = false;
 let latestDetected = false;
 let renderer: any = null;
 let ws: WebSocket | null = null;
+
+let availableBones: any[] = [];
+
+function initDebugBlendshapeUi() {
+  debugBlendshapeSelect.innerHTML = "";
+
+  for (const name of ARKIT_NAMES) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    debugBlendshapeSelect.appendChild(option);
+  }
+
+  debugBlendshapeValue.oninput = () => {
+    debugBlendshapeValueLabel.textContent = Number(debugBlendshapeValue.value).toFixed(2);
+  };
+
+  debugResetBlendshapeBtn.onclick = () => {
+    debugBlendshapeValue.value = "0";
+    debugBlendshapeValueLabel.textContent = "0.00";
+  };
+}
+
+function refreshDebugBoneUi() {
+  debugBoneSelect.innerHTML = "";
+  availableBones = [];
+
+  const bones = renderer?.viewer?.skinModel?.skeleton?.bones || [];
+
+  for (const bone of bones) {
+    availableBones.push(bone);
+
+    const option = document.createElement("option");
+    option.value = bone.name;
+    option.textContent = bone.name;
+    debugBoneSelect.appendChild(option);
+  }
+
+  // console.log("=== DEBUG BONE UI BONES ===");
+  // console.log(availableBones.map((b: any) => b.name).join("\n"));
+}
+
+function initDebugBoneUi() {
+  const updateLabels = () => {
+    debugBoneRotXLabel.textContent = Number(debugBoneRotX.value).toFixed(2);
+    debugBoneRotYLabel.textContent = Number(debugBoneRotY.value).toFixed(2);
+    debugBoneRotZLabel.textContent = Number(debugBoneRotZ.value).toFixed(2);
+    applyDebugBoneRotation();
+  };
+
+  debugBoneRotX.oninput = updateLabels;
+  debugBoneRotY.oninput = updateLabels;
+  debugBoneRotZ.oninput = updateLabels;
+
+  debugBoneSelect.onchange = () => {
+    debugBoneRotX.value = "0";
+    debugBoneRotY.value = "0";
+    debugBoneRotZ.value = "0";
+    updateLabels();
+  };
+
+  debugResetBoneBtn.onclick = () => {
+    debugBoneRotX.value = "0";
+    debugBoneRotY.value = "0";
+    debugBoneRotZ.value = "0";
+    updateLabels();
+  };
+
+  updateLabels();
+}
+
+function applyDebugBlendshape(input: BlendshapeMap): BlendshapeMap {
+  const out = { ...input };
+
+  if (!debugEnableInput.checked) {
+    return out;
+  }
+
+  const name = debugBlendshapeSelect.value;
+  const value = clamp01(Number(debugBlendshapeValue.value));
+
+  if (debugAdditiveInput.checked) {
+    out[name] = clamp01((out[name] ?? 0) + value);
+  } else {
+    for (const key of Object.keys(out)) {
+      out[key] = 0.0;
+    }
+    out[name] = value;
+  }
+
+  return out;
+}
+
+function applyDebugBoneRotation() {
+  if (!renderer) return;
+
+  const boneName = debugBoneSelect.value;
+  if (!boneName) return;
+
+  const bone = availableBones.find((b: any) => b.name === boneName);
+  if (!bone) return;
+
+  const neutral = neutralBoneRotations[boneName] || bone.rotation.clone();
+  neutralBoneRotations[boneName] = neutral;
+
+  const rx = Number(debugBoneRotX.value);
+  const ry = Number(debugBoneRotY.value);
+  const rz = Number(debugBoneRotZ.value);
+
+  bone.rotation.x = neutral.x + rx;
+  bone.rotation.y = neutral.y + ry;
+  bone.rotation.z = neutral.z + rz;
+
+  bone.updateMatrixWorld(true);
+
+  const skeleton = renderer?.viewer?.skinModel?.skeleton;
+  if (skeleton) {
+    skeleton.update();
+  }
+}
+
+function reconnectWebSocket() {
+  if (ws) {
+    ws.close(1000, "mapping mode changed");
+    ws = null;
+  }
+
+  if (renderer) {
+    connectWebSocket();
+  }
+}
 
 function setStatus(text: string) {
   statusEl.textContent = text;
@@ -152,14 +314,18 @@ function appendStatus(text: string) {
 
 function buildWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws/live?output_mode=webgl&ui_fps=30`;
+  const mappingMode = encodeURIComponent(mappingModeSelect.value || "stable");
+  return `${protocol}://${window.location.host}/ws/live` +
+    `?output_mode=webgl` +
+    `&ui_fps=30` +
+    `&mapping_mode=${mappingMode}`;
 }
 
 async function exportAvatarFromPhoto(file: File): Promise<ExportResponse> {
   const form = new FormData();
   form.append("image", file);
 
-  const blenderPath = blenderPathInput.value.trim();
+  const blenderPath = blenderPathInput?.value?.trim() || "";
   if (blenderPath.length > 0) {
     form.append("blender_path", blenderPath);
   }
@@ -215,8 +381,9 @@ async function initRenderer(assetPath: string) {
 
   appendStatus("Renderer ready");
   setTimeout(() => {
-    debugRendererObjects();
+    // debugRendererObjects();
     initHeadPoseBones();
+    refreshDebugBoneUi();
     patchMixerForHeadPose();
   }, 1000);
 }
@@ -371,13 +538,19 @@ function connectWebSocket() {
     }
 
     latestDetected = Boolean(msg.detected);
-    latestBlendshapes = normalizeBlendshapes(msg.blendshapes);
+    // latestBlendshapes = normalizeBlendshapes(msg.blendshapes);
+    latestBlendshapes = applyDebugBlendshape(
+      normalizeBlendshapes(msg.blendshapes)
+    );
+    const derived = msg.derived_blendshapes || {};
     latestHeadMatrix = msg.facial_matrix ?? null;
     applyHeadPose(latestHeadMatrix);
+    applyDebugBoneRotation();
 
     const lines = [
       "=== WEBGL LIVE ===",
       `detected      : ${latestDetected}`,
+      `mapping_mode  : ${mappingModeSelect.value}`,
       `fps_capture   : ${(msg.fps_capture ?? 0).toFixed(2)}`,
       `fps_sent      : ${(msg.fps_sent ?? 0).toFixed(2)}`,
       "",
@@ -401,6 +574,14 @@ function connectWebSocket() {
       `cheekSquintL  : ${(latestBlendshapes.cheekSquintLeft ?? 0).toFixed(3)}`,
       `cheekSquintR  : ${(latestBlendshapes.cheekSquintRight ?? 0).toFixed(3)}`,
       `cheekPuff     : ${(latestBlendshapes.cheekPuff ?? 0).toFixed(3)}`,
+      "=== DERIVED LANDMARKS ===",
+      `drv noseSneerL  : ${(derived.noseSneerLeft ?? 0).toFixed(3)}`,
+      `drv noseSneerR  : ${(derived.noseSneerRight ?? 0).toFixed(3)}`,
+      `drv browInnerUp : ${(derived.browInnerUp ?? 0).toFixed(3)}`,
+      `drv browOuterL  : ${(derived.browOuterUpLeft ?? 0).toFixed(3)}`,
+      `drv browOuterR  : ${(derived.browOuterUpRight ?? 0).toFixed(3)}`,
+      `drv browDownL   : ${(derived.browDownLeft ?? 0).toFixed(3)}`,
+      `drv browDownR   : ${(derived.browDownRight ?? 0).toFixed(3)}`,
     ];
 
     setStatus(lines.join("\n"));
@@ -448,6 +629,9 @@ createBtn.onclick = async () => {
     createBtn.disabled = false;
   }
 };
+
+initDebugBlendshapeUi();
+initDebugBoneUi();
 
 window.addEventListener("beforeunload", () => {
   if (ws) ws.close(1000, "page unload");

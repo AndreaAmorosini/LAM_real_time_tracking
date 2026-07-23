@@ -17,6 +17,7 @@ from lam.live.live_motion import LiveMotionProvider
 from lam.live.debug_draw import draw_face_landmarks, draw_blendshape_debug
 from lam.live.lam_live_renderer import LAMLiveRenderer
 from lam.live.retargeting.mediapipe_to_flame import MediaPipeToFlameAdapter
+from lam.live.retargeting.landmark_derived_blendshapes import LandmarkDerivedBlendshapes
 from lam.live.source_preprocessor import LAMSourcePreprocessor
 from lam.live.oac_exporter import export_oac_zip_from_live_renderer, safe_avatar_id
 from vhap.model import flame
@@ -341,229 +342,551 @@ ARKIT_BLENDSHAPE_NAMES = [
     "tongueOut",
 ]
 
-def postprocess_webgl_blendshapes(b):
-    keep = {
-        # Jaw
-        "jawOpen",
-        "jawLeft",
-        "jawRight",
+LANDMARK_DERIVED_OVERRIDE_NAMES = {
+    "browOuterUpLeft",
+    "browOuterUpRight",
+    "browInnerUp",
+    "browDownLeft",
+    "browDownRight",
+    "noseSneerLeft",
+    "noseSneerRight",
+    "cheekSquintLeft",
+    "cheekSquintRight",
+    "cheekPuff",
+    "mouthUpperUpLeft",
+    "mouthUpperUpRight",
+    #Questi tre opzionali per maggiore espressività, ma non sempre affidabili.
+    "eyeWideLeft",
+    "eyeWideRight",
+    "jawOpen"
+}
 
-        # Mouth core
-        "mouthSmileLeft",
-        "mouthSmileRight",
-        "mouthFrownLeft",
-        "mouthFrownRight",
-        "mouthPucker",
-        "mouthFunnel",
 
-        # Mouth corners / expressivity
-        "mouthStretchLeft",
-        "mouthStretchRight",
-        "mouthDimpleLeft",
-        "mouthDimpleRight",
-        "mouthLeft",
-        "mouthRight",
+WEBGL_ALL_VALID_BLENDSHAPES = {
+    "browDownLeft", "browDownRight",
+    "browInnerUp",
+    "browOuterUpLeft", "browOuterUpRight",
 
-        # Lips vertical
-        "mouthLowerDownLeft",
-        "mouthLowerDownRight",
-        "mouthUpperUpLeft",
-        "mouthUpperUpRight",
+    "cheekPuff",
+    "cheekSquintLeft", "cheekSquintRight",
 
-        # Eyes
-        "eyeBlinkLeft",
-        "eyeBlinkRight",
-        "eyeSquintLeft",
-        "eyeSquintRight",
-        "eyeWideLeft",
-        "eyeWideRight",
+    "eyeBlinkLeft", "eyeBlinkRight",
+    "eyeLookDownLeft", "eyeLookDownRight",
+    "eyeLookInLeft", "eyeLookInRight",
+    "eyeLookOutLeft", "eyeLookOutRight",
+    "eyeLookUpLeft", "eyeLookUpRight",
+    "eyeSquintLeft", "eyeSquintRight",
+    "eyeWideLeft", "eyeWideRight",
 
-        # Brows
-        "browInnerUp",
-        "browOuterUpLeft",
-        "browOuterUpRight",
-        "browDownLeft",
-        "browDownRight",
+    "jawForward",
+    "jawLeft", "jawRight",
+    "jawOpen",
 
-        # Nose
-        "noseSneerLeft",
-        "noseSneerRight",
+    "mouthClose",
+    "mouthDimpleLeft", "mouthDimpleRight",
+    "mouthFrownLeft", "mouthFrownRight",
+    "mouthFunnel",
+    "mouthLeft", "mouthRight",
+    "mouthLowerDownLeft", "mouthLowerDownRight",
+    "mouthPressLeft", "mouthPressRight",
+    "mouthPucker",
+    "mouthRollLower", "mouthRollUpper",
+    "mouthShrugLower", "mouthShrugUpper",
+    "mouthSmileLeft", "mouthSmileRight",
+    "mouthStretchLeft", "mouthStretchRight",
+    "mouthUpperUpLeft", "mouthUpperUpRight",
 
-        # Cheeks / zigomi
-        "cheekSquintLeft",
-        "cheekSquintRight",
-        "cheekPuff",
-        "mouthCheekPuff",
-    }
+    "noseSneerLeft", "noseSneerRight",
+}
 
+
+def _clamp01(v):
+    return float(max(0.0, min(1.0, float(v))))
+
+
+def _apply_keep(b, keep):
     for k in list(b.keys()):
         if k not in keep:
             b[k] = 0.0
+    return b
 
-    deadzones = {
-        # Mouth: lower deadzone for corners
-        "jawOpen": 0.035,
-        "jawLeft": 0.05,
-        "jawRight": 0.05,
 
-        "mouthSmileLeft": 0.025,
-        "mouthSmileRight": 0.025,
-        "mouthFrownLeft": 0.035,
-        "mouthFrownRight": 0.035,
-        "mouthPucker": 0.045,
-        "mouthFunnel": 0.045,
-
-        "mouthStretchLeft": 0.025,
-        "mouthStretchRight": 0.025,
-        "mouthDimpleLeft": 0.025,
-        "mouthDimpleRight": 0.025,
-        "mouthLeft": 0.04,
-        "mouthRight": 0.04,
-
-        "mouthLowerDownLeft": 0.035,
-        "mouthLowerDownRight": 0.035,
-        "mouthUpperUpLeft": 0.035,
-        "mouthUpperUpRight": 0.035,
-
-        # Eyes
-        "eyeBlinkLeft": 0.02,
-        "eyeBlinkRight": 0.02,
-        "eyeSquintLeft": 0.03,
-        "eyeSquintRight": 0.03,
-        "eyeWideLeft": 0.035,
-        "eyeWideRight": 0.035,
-
-        # Brows: lower threshold so they can appear
-        "browInnerUp": 0.02,
-        "browOuterUpLeft": 0.02,
-        "browOuterUpRight": 0.02,
-        "browDownLeft": 0.025,
-        "browDownRight": 0.025,
-
-        # Nose / cheeks: lower threshold because MediaPipe often outputs small values
-        "noseSneerLeft": 0.02,
-        "noseSneerRight": 0.02,
-        "cheekSquintLeft": 0.025,
-        "cheekSquintRight": 0.025,
-        "cheekPuff": 0.04,
-        "mouthCheekPuff": 0.04,
-    }
-
+def _apply_deadzones(b, deadzones):
     for k, dz in deadzones.items():
         if abs(b.get(k, 0.0)) < dz:
             b[k] = 0.0
+    return b
 
-    gains = {
-        # Jaw
-        "jawOpen": 0.95,
-        "jawLeft": 0.75,
-        "jawRight": 0.75,
 
-        # Mouth core
-        "mouthSmileLeft": 1.45,
-        "mouthSmileRight": 1.45,
-        "mouthFrownLeft": 1.05,
-        "mouthFrownRight": 1.05,
-        "mouthPucker": 0.85,
-        "mouthFunnel": 0.85,
-
-        # Mouth corners
-        "mouthStretchLeft": 1.35,
-        "mouthStretchRight": 1.35,
-        "mouthDimpleLeft": 1.25,
-        "mouthDimpleRight": 1.25,
-        "mouthLeft": 0.90,
-        "mouthRight": 0.90,
-
-        # Lips vertical
-        "mouthLowerDownLeft": 0.90,
-        "mouthLowerDownRight": 0.90,
-        "mouthUpperUpLeft": 0.95,
-        "mouthUpperUpRight": 0.95,
-
-        # Eyes
-        "eyeBlinkLeft": 1.25,
-        "eyeBlinkRight": 1.25,
-        "eyeSquintLeft": 1.00,
-        "eyeSquintRight": 1.00,
-        "eyeWideLeft": 1.00,
-        "eyeWideRight": 1.00,
-
-        # Brows: boost visibly
-        "browInnerUp": 2.00,
-        "browOuterUpLeft": 2.00,
-        "browOuterUpRight": 2.00,
-        "browDownLeft": 1.60,
-        "browDownRight": 1.60,
-
-        # Nose / cheeks
-        "noseSneerLeft": 2.00,
-        "noseSneerRight": 2.00,
-        "cheekSquintLeft": 1.50,
-        "cheekSquintRight": 1.50,
-        "cheekPuff": 0.85,
-        "mouthCheekPuff": 0.85,
-    }
-
+def _apply_gains(b, gains):
     for k, g in gains.items():
         b[k] = b.get(k, 0.0) * g
+    return b
 
-    # Workaround: noseSneer is often not visible on the Gaussian avatar.
-    # Remap it to cheeks/zigomi and slight eye squint for a visible sneer-like effect.
+
+def _clamp_all(b):
+    for k in list(b.keys()):
+        b[k] = _clamp01(b[k])
+    return b
+
+
+def _apply_common_conflicts(b):
+    # jawOpen vs mouthClose
+    if b.get("jawOpen", 0.0) > 0.10:
+        b["mouthClose"] = 0.0
+
+    # pucker/funnel compete but do not fully cancel.
+    if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
+        b["mouthFunnel"] *= 0.45
+    else:
+        b["mouthPucker"] *= 0.45
+
+    # MediaPipe cheekPuff compatibility alias.
+    b["mouthCheekPuff"] = max(
+        b.get("mouthCheekPuff", 0.0),
+        b.get("cheekPuff", 0.0),
+    )
+
+    # Optional visible sneer workaround.
     nose_l = b.get("noseSneerLeft", 0.0)
     nose_r = b.get("noseSneerRight", 0.0)
+
+    b["cheekSquintLeft"] = max(b.get("cheekSquintLeft", 0.0), nose_l * 0.8)
+    b["cheekSquintRight"] = max(b.get("cheekSquintRight", 0.0), nose_r * 0.8)
+
+    return b
+
+def postprocess_webgl_blendshapes_raw_debug(b):
+    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
+
+    # Very light deadzone only.
+    deadzones = {k: 0.01 for k in WEBGL_ALL_VALID_BLENDSHAPES}
+    _apply_deadzones(b, deadzones)
+
+    # No gains.
+    _apply_common_conflicts(b)
+    _clamp_all(b)
+    return b
+
+def postprocess_webgl_blendshapes_stable_live(b):
+    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
+
+    deadzones = {
+        # Brows
+        "browDownLeft": 0.035,
+        "browDownRight": 0.035,
+        "browInnerUp": 0.005,
+        "browOuterUpLeft": 0.005,
+        "browOuterUpRight": 0.005,
+
+        # Cheeks / nose
+        "cheekPuff": 0.05,
+        "cheekSquintLeft": 0.035,
+        "cheekSquintRight": 0.035,
+        "noseSneerLeft": 0.005,
+        "noseSneerRight": 0.005,
+
+        # Eyes
+        "eyeBlinkLeft": 0.025,
+        "eyeBlinkRight": 0.025,
+        "eyeLookDownLeft": 0.05,
+        "eyeLookDownRight": 0.05,
+        "eyeLookInLeft": 0.05,
+        "eyeLookInRight": 0.05,
+        "eyeLookOutLeft": 0.05,
+        "eyeLookOutRight": 0.05,
+        "eyeLookUpLeft": 0.05,
+        "eyeLookUpRight": 0.05,
+        "eyeSquintLeft": 0.035,
+        "eyeSquintRight": 0.035,
+        "eyeWideLeft": 0.015,
+        "eyeWideRight": 0.015,
+
+        # Jaw
+        "jawForward": 0.06,
+        "jawLeft": 0.05,
+        "jawRight": 0.05,
+        "jawOpen": 0.07,
+
+        # Mouth
+        "mouthClose": 0.05,
+        "mouthDimpleLeft": 0.035,
+        "mouthDimpleRight": 0.035,
+        "mouthFrownLeft": 0.04,
+        "mouthFrownRight": 0.04,
+        "mouthFunnel": 0.05,
+        "mouthLeft": 0.05,
+        "mouthRight": 0.05,
+        "mouthLowerDownLeft": 0.04,
+        "mouthLowerDownRight": 0.04,
+        "mouthPressLeft": 0.05,
+        "mouthPressRight": 0.05,
+        "mouthPucker": 0.05,
+        "mouthRollLower": 0.05,
+        "mouthRollUpper": 0.05,
+        "mouthShrugLower": 0.05,
+        "mouthShrugUpper": 0.05,
+        "mouthSmileLeft": 0.025,
+        "mouthSmileRight": 0.025,
+        "mouthStretchLeft": 0.03,
+        "mouthStretchRight": 0.03,
+        "mouthUpperUpLeft": 0.04,
+        "mouthUpperUpRight": 0.04,
+    }
+
+    gains = {
+        # Brows
+        "browDownLeft": 2.2,
+        "browDownRight": 2.2,
+        "browInnerUp": 3.0,
+        "browOuterUpLeft": 3.0,
+        "browOuterUpRight": 3.0,
+
+        # Cheeks / nose
+        "cheekPuff": 0.7,
+        "cheekSquintLeft": 2.0,
+        "cheekSquintRight": 2.0,
+        "noseSneerLeft": 3.0,
+        "noseSneerRight": 3.0,
+
+        # Eyes
+        "eyeBlinkLeft": 1.1,
+        "eyeBlinkRight": 1.1,
+        "eyeLookDownLeft": 0.35,
+        "eyeLookDownRight": 0.35,
+        "eyeLookInLeft": 0.35,
+        "eyeLookInRight": 0.35,
+        "eyeLookOutLeft": 0.35,
+        "eyeLookOutRight": 0.35,
+        "eyeLookUpLeft": 0.35,
+        "eyeLookUpRight": 0.35,
+        "eyeSquintLeft": 0.8,
+        "eyeSquintRight": 0.8,
+        "eyeWideLeft": 2.0,
+        "eyeWideRight": 2.0,
+
+        # Jaw
+        "jawForward": 0.30,
+        "jawLeft": 0.45,
+        "jawRight": 0.45,
+        "jawOpen": 0.45,
+
+        # Mouth
+        "mouthClose": 0.40,
+        "mouthDimpleLeft": 1.0,
+        "mouthDimpleRight": 1.0,
+        "mouthFrownLeft": 0.9,
+        "mouthFrownRight": 0.9,
+        "mouthFunnel": 0.70,
+        "mouthLeft": 0.65,
+        "mouthRight": 0.65,
+        "mouthLowerDownLeft": 0.70,
+        "mouthLowerDownRight": 0.70,
+        "mouthPressLeft": 0.55,
+        "mouthPressRight": 0.55,
+        "mouthPucker": 0.70,
+        "mouthRollLower": 0.45,
+        "mouthRollUpper": 0.45,
+        "mouthShrugLower": 0.55,
+        "mouthShrugUpper": 0.55,
+        "mouthSmileLeft": 1.20,
+        "mouthSmileRight": 1.20,
+        "mouthStretchLeft": 1.05,
+        "mouthStretchRight": 1.05,
+        "mouthUpperUpLeft": 0.70,
+        "mouthUpperUpRight": 0.70,
+    }
+
+    _apply_deadzones(b, deadzones)
+    _apply_gains(b, gains)
+
+    jaw = b.get("jawOpen", 0.0)
     
+    if jaw < 0.08:
+        b["jawOpen"] = 0.0
+
+    # Derived/proxy nose and cheek expressions.
+    # MediaPipe often keeps noseSneer/cheekSquint/cheekPuff at 0.
+    # We synthesize them from more reliable nearby facial signals.
+    upper_l = b.get("mouthUpperUpLeft", 0.0)
+    upper_r = b.get("mouthUpperUpRight", 0.0)
+
+    smile_l = b.get("mouthSmileLeft", 0.0)
+    smile_r = b.get("mouthSmileRight", 0.0)
+
+    squint_l = b.get("eyeSquintLeft", 0.0)
+    squint_r = b.get("eyeSquintRight", 0.0)
+
+    pucker = b.get("mouthPucker", 0.0)
+    funnel = b.get("mouthFunnel", 0.0)
+
+    # Nose sneer proxy: upper lip raise is the closest reliable signal.
+    b["noseSneerLeft"] = max(
+        b.get("noseSneerLeft", 0.0),
+        upper_l * 1.30,
+    )
+    b["noseSneerRight"] = max(
+        b.get("noseSneerRight", 0.0),
+        upper_r * 1.30,
+    )
+
+    # Cheek/zygoma proxy: smile corners + eye squint.
     b["cheekSquintLeft"] = max(
         b.get("cheekSquintLeft", 0.0),
-        nose_l * 1.2,
+        smile_l * 0.45,
+        squint_l * 0.70,
     )
     b["cheekSquintRight"] = max(
         b.get("cheekSquintRight", 0.0),
-        nose_r * 1.2,
+        smile_r * 0.45,
+        squint_r * 0.70,
     )
-    
-    b["eyeSquintLeft"] = max(
-        b.get("eyeSquintLeft", 0.0),
-        nose_l * 0.35,
-    )
-    b["eyeSquintRight"] = max(
-        b.get("eyeSquintRight", 0.0),
-        nose_r * 0.35,
+
+    # Cheek puff is hard to estimate from webcam.
+    # Pucker/funnel gives a subtle approximation.
+    b["cheekPuff"] = max(
+        b.get("cheekPuff", 0.0),
+        min(0.35, max(pucker, funnel) * 0.35),
     )
 
     b["mouthCheekPuff"] = max(
         b.get("mouthCheekPuff", 0.0),
         b.get("cheekPuff", 0.0),
     )
-
-    # Keep conflicts controlled but not too destructive.
-    if b.get("jawOpen", 0.0) > 0.10:
-        b["mouthPucker"] *= 0.75
-        b["mouthFunnel"] *= 0.75
-
-    # Pucker/funnel: reduce weaker one, don't zero it completely.
-    if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
-        b["mouthFunnel"] *= 0.55
-    else:
-        b["mouthPucker"] *= 0.55
-
-    for k in list(b.keys()):
-        b[k] = float(max(0.0, min(1.0, b[k])))
-
+    
+    _apply_common_conflicts(b)
+    _clamp_all(b)
     return b
 
+def postprocess_webgl_blendshapes_expressive_live(b):
+    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
+
+    deadzones = {
+        # Lower thresholds for responsiveness.
+        "browDownLeft": 0.006,
+        "browDownRight": 0.006,
+        "browInnerUp": 0.004,
+        "browOuterUpLeft": 0.004,
+        "browOuterUpRight": 0.004,
+
+        "cheekPuff": 0.035,
+        "cheekSquintLeft": 0.006,
+        "cheekSquintRight": 0.006,
+        "noseSneerLeft": 0.004,
+        "noseSneerRight": 0.004,
+
+        "eyeBlinkLeft": 0.018,
+        "eyeBlinkRight": 0.018,
+        "eyeLookDownLeft": 0.04,
+        "eyeLookDownRight": 0.04,
+        "eyeLookInLeft": 0.04,
+        "eyeLookInRight": 0.04,
+        "eyeLookOutLeft": 0.04,
+        "eyeLookOutRight": 0.04,
+        "eyeLookUpLeft": 0.04,
+        "eyeLookUpRight": 0.04,
+        "eyeSquintLeft": 0.025,
+        "eyeSquintRight": 0.025,
+        "eyeWideLeft": 0.03,
+        "eyeWideRight": 0.03,
+
+        "jawForward": 0.05,
+        "jawLeft": 0.04,
+        "jawRight": 0.04,
+        "jawOpen": 0.008,
+
+        "mouthClose": 0.04,
+        "mouthDimpleLeft": 0.025,
+        "mouthDimpleRight": 0.025,
+        "mouthFrownLeft": 0.03,
+        "mouthFrownRight": 0.03,
+        "mouthFunnel": 0.04,
+        "mouthLeft": 0.04,
+        "mouthRight": 0.04,
+        "mouthLowerDownLeft": 0.03,
+        "mouthLowerDownRight": 0.03,
+        "mouthPressLeft": 0.04,
+        "mouthPressRight": 0.04,
+        "mouthPucker": 0.04,
+        "mouthRollLower": 0.04,
+        "mouthRollUpper": 0.04,
+        "mouthShrugLower": 0.04,
+        "mouthShrugUpper": 0.04,
+        "mouthSmileLeft": 0.006,
+        "mouthSmileRight": 0.006,
+        "mouthStretchLeft": 0.006,
+        "mouthStretchRight": 0.006,
+        "mouthUpperUpLeft": 0.03,
+        "mouthUpperUpRight": 0.03,
+    }
+
+    gains = {
+        # Brows
+        "browDownLeft": 1.5,
+        "browDownRight": 1.5,
+        "browInnerUp": 2.1,
+        "browOuterUpLeft": 2.0,
+        "browOuterUpRight": 2.0,
+
+        # Cheeks / nose
+        "cheekPuff": 0.9,
+        "cheekSquintLeft": 1.5,
+        "cheekSquintRight": 1.5,
+        "noseSneerLeft": 2.0,
+        "noseSneerRight": 2.0,
+
+        # Eyes
+        "eyeBlinkLeft": 1.3,
+        "eyeBlinkRight": 1.3,
+        "eyeLookDownLeft": 0.50,
+        "eyeLookDownRight": 0.50,
+        "eyeLookInLeft": 0.50,
+        "eyeLookInRight": 0.50,
+        "eyeLookOutLeft": 0.50,
+        "eyeLookOutRight": 0.50,
+        "eyeLookUpLeft": 0.50,
+        "eyeLookUpRight": 0.50,
+        "eyeSquintLeft": 1.05,
+        "eyeSquintRight": 1.05,
+        "eyeWideLeft": 1.0,
+        "eyeWideRight": 1.0,
+
+        # Jaw
+        "jawForward": 0.45,
+        "jawLeft": 0.65,
+        "jawRight": 0.65,
+        "jawOpen": 0.85,
+
+        # Mouth
+        "mouthClose": 0.50,
+        "mouthDimpleLeft": 1.35,
+        "mouthDimpleRight": 1.35,
+        "mouthFrownLeft": 1.20,
+        "mouthFrownRight": 1.20,
+        "mouthFunnel": 0.90,
+        "mouthLeft": 0.85,
+        "mouthRight": 0.85,
+        "mouthLowerDownLeft": 0.95,
+        "mouthLowerDownRight": 0.95,
+        "mouthPressLeft": 0.75,
+        "mouthPressRight": 0.75,
+        "mouthPucker": 0.90,
+        "mouthRollLower": 0.65,
+        "mouthRollUpper": 0.65,
+        "mouthShrugLower": 0.75,
+        "mouthShrugUpper": 0.75,
+        "mouthSmileLeft": 1.55,
+        "mouthSmileRight": 1.55,
+        "mouthStretchLeft": 1.35,
+        "mouthStretchRight": 1.35,
+        "mouthUpperUpLeft": 0.95,
+        "mouthUpperUpRight": 0.95,
+    }
+
+    _apply_deadzones(b, deadzones)
+    _apply_gains(b, gains)
+    _apply_common_conflicts(b)
+    _clamp_all(b)
+    return b
+
+def postprocess_webgl_blendshapes(b, mode="stable"):
+    if mode == "raw":
+        return postprocess_webgl_blendshapes_raw_debug(b)
+    if mode == "expressive":
+        return postprocess_webgl_blendshapes_expressive_live(b)
+    return postprocess_webgl_blendshapes_stable_live(b)
+
+def head_motion_factor(tracking):
+    if tracking is None or tracking.facial_matrix is None:
+        return 1.0
+
+    import math
+    import numpy as np
+
+    M = np.asarray(tracking.facial_matrix, dtype=float)
+
+    if M.shape != (4, 4):
+        return 1.0
+
+    yaw = math.atan2(M[0][2], M[2][2])
+    pitch = math.atan2(
+        -M[1][2],
+        math.sqrt(M[1][0] ** 2 + M[1][1] ** 2),
+    )
+
+    amount = abs(yaw) + abs(pitch)
+
+    # ~10 degrees: full derived landmarks
+    low = 0.18
+
+    # ~30 degrees: strongly reduced derived landmarks
+    high = 0.55
+
+    if amount <= low:
+        return 1.0
+
+    if amount >= high:
+        return 0.25
+
+    t = (amount - low) / (high - low)
+    return 1.0 * (1.0 - t) + 0.25 * t
 
 
-def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: float):
+def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: float, mapping_mode: str = "stable", landmark_derived=None):
     blendshapes = {name: 0.0 for name in ARKIT_BLENDSHAPE_NAMES}
-
     if tracking is not None and tracking.detected:
         for name, value in tracking.blendshapes.items():
             if name in blendshapes:
                 blendshapes[name] = float(value)
 
+    derived_blendshapes = {}
+    if landmark_derived is not None:
+        derived_blendshapes = landmark_derived.derive(tracking)
+        derived_factor = head_motion_factor(tracking)
+        for name, value in derived_blendshapes.items():
+            # if name in blendshapes and name in LANDMARK_DERIVED_OVERRIDE_NAMES:
+            #     value = float(value) * derived_factor
+            #     blendshapes[name] = max(blendshapes.get(name, 0.0), float(value))
+            if name not in blendshapes or name not in LANDMARK_DERIVED_OVERRIDE_NAMES:
+                continue
+
+            raw_value = float(blendshapes.get(name, 0.0))
+            derived_value = float(value)
+
+            if name in {"jawOpen", "eyeWideLeft", "eyeWideRight"}:
+                    if derived_factor < 0.85:
+                        continue
+        
+            # Apply global head-pose gating to derived landmarks.
+            derived_value *= derived_factor
+    
+            if name == "jawOpen":
+                raw = raw_value
+                drv = derived_value
+            
+                jaw = max(drv * 0.65, raw * 0.25)
+                
+                if jaw < 0.24:
+                    jaw = 0.0
+
+                jaw = min(jaw, 0.55)
+            
+                blendshapes["jawOpen"] = jaw
+                continue
+    
+            if name in {"eyeWideLeft", "eyeWideRight"}:
+                # Use derived eyeWide only when clearly active.
+                if derived_value > 0.15:
+                    blendshapes[name] = max(raw_value, derived_value)
+                else:
+                    blendshapes[name] = raw_value
+                continue
+    
+            # Default behavior for brows/nose/cheeks.
+            blendshapes[name] = max(raw_value, derived_value)
+
     blendshapes["mouthCheekPuff"] = blendshapes.get("cheekPuff", 0.0)
-    blendshapes = postprocess_webgl_blendshapes(blendshapes)
+    blendshapes = postprocess_webgl_blendshapes(blendshapes, mode=mapping_mode)
 
     facial_matrix = None
     if tracking is not None and tracking.facial_matrix is not None:
@@ -576,7 +899,10 @@ def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: flo
         "facial_matrix": facial_matrix,
         "fps_capture": fps_capture,
         "fps_sent": fps_sent,
+        "mapping_mode": mapping_mode,
         "status": status,
+        "derived_blendshapes": derived_blendshapes,
+        "derived_factor": head_motion_factor(tracking),
     }
 
 @app.get("/")
@@ -701,6 +1027,21 @@ async def client_requested_stop(websocket: WebSocket) -> bool:
     except Exception:
         return False
 
+async def receive_client_control(websocket: WebSocket):
+    try:
+        msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
+    except asyncio.TimeoutError:
+        return None
+    except WebSocketDisconnect:
+        return {"type": "disconnect"}
+    except Exception:
+        return {"type": "disconnect"}
+
+    try:
+        return json.loads(msg)
+    except Exception:
+        return None
+
 
 @app.post("/api/oac/export")
 async def export_oac_from_image(
@@ -791,6 +1132,9 @@ async def live_ws(websocket: WebSocket):
         source_input_mode = "preprocessed"
     source_image_path = query.get("source_image_path", "")
     output_mode = query.get("output_mode", "debug")
+    mapping_mode = query.get("mapping_mode", "stable")
+    if mapping_mode not in ["stable", "expressive", "raw"]:
+        mapping_mode = "stable"
     flame_backend = query.get("flame_backend", "standard")
     if flame_backend not in ["standard", "arkit"]:
         flame_backend = "standard"
@@ -809,10 +1153,6 @@ async def live_ws(websocket: WebSocket):
     jpeg_quality = max(20, min(jpeg_quality, 100))
 
     frame_interval = 1.0 / ui_fps
-
-    # if output_mode == "lam":
-    #     ui_fps = min(ui_fps, 2.0)
-    #     frame_interval = 1.0 / ui_fps
 
     provider: Optional[LiveMotionProvider] = None
     lam_renderer: Optional[LAMLiveRenderer] = None
@@ -905,14 +1245,24 @@ async def live_ws(websocket: WebSocket):
                     websocket,
                     f"ERROR initializing LAM renderer:\n{repr(e)}",
                 )
-                return
+                return 
 
-
+        landmark_derived = LandmarkDerivedBlendshapes(neutral_frames=20, alpha=0.60)
+        
         while True:
 
-            if await client_requested_stop(websocket):
-                print("[STREAM] client requested stop, stopping loop")
-                break
+            control = await receive_client_control(websocket)
+            
+            if control:
+                if control.get("type") in ["stop", "disconnect"]:
+                    print("[STREAM] client requested stop/disconnect, stopping loop")
+                    break
+            
+                if control.get("type") == "set_mapping_mode":
+                    new_mode = control.get("mapping_mode", "stable")
+                    if new_mode in ["raw", "stable", "expressive"]:
+                        mapping_mode = new_mode
+                        print("[STREAM] mapping_mode changed to:", mapping_mode)
                 
             loop_t0 = time.time()
             render_dt = 0.0
@@ -955,6 +1305,8 @@ async def live_ws(websocket: WebSocket):
                     status=status,
                     fps_capture=fps_capture,
                     fps_sent=fps_sent,
+                    mapping_mode=mapping_mode,
+                    landmark_derived=landmark_derived
                 )
 
                 send_ok = await safe_send_json(websocket, payload)
@@ -1041,9 +1393,18 @@ async def live_ws(websocket: WebSocket):
                 "status": status,
             }
 
-            if await client_requested_stop(websocket):
-                print("[STREAM] client requested stop, stopping loop")
-                break
+            control = await receive_client_control(websocket)
+            
+            if control:
+                if control.get("type") in ["stop", "disconnect"]:
+                    print("[STREAM] client requested stop/disconnect, stopping loop")
+                    break
+            
+                if control.get("type") == "set_mapping_mode":
+                    new_mode = control.get("mapping_mode", "stable")
+                    if new_mode in ["raw", "stable", "expressive"]:
+                        mapping_mode = new_mode
+                        print("[STREAM] mapping_mode changed to:", mapping_mode)
 
             send_t0 = time.time()
             send_ok = await safe_send_json(websocket, payload)
@@ -1072,12 +1433,18 @@ async def live_ws(websocket: WebSocket):
 
             await asyncio.sleep(0)
 
+    except asyncio.CancelledError:
+        print("[STREAM] websocket cancelled, stopping loop")
+        raise
     except WebSocketDisconnect:
         pass
 
     finally:
         if provider is not None:
-            provider.close()
+            try:
+                provider.close()
+            except Exception as e:
+                print("[STREAM] error closing provider:", repr(e))
 
         if lam_renderer is not None:
             pass

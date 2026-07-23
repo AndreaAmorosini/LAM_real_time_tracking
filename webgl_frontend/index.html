@@ -65,6 +65,22 @@
       padding: 10px;
       border: 1px solid #333;
     }
+
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      margin-bottom: 10px;
+      padding: 8px;
+      background: #222;
+      color: #eee;
+      border: 1px solid #444;
+    }
+    
+    hr {
+      border: 0;
+      border-top: 1px solid #333;
+      margin: 14px 0;
+    }
   </style>
 </head>
 <body>
@@ -76,14 +92,66 @@
     <label>Photo</label>
     <input id="photoInput" type="file" accept="image/*" />
 
-    <label>Blender path optional</label>
-    <input
-      id="blenderPathInput"
-      type="text"
-      placeholder="/path/to/blender or leave empty"
-    />
+    <label>Tracking mapping mode</label>
+    <select id="mappingModeSelect">
+      <option value="stable" selected>Stable Live</option>
+      <option value="expressive">Expressive Live</option>
+      <option value="raw">Raw Debug</option>
+    </select>
+
 
     <button id="createBtn">Upload Photo → Create Avatar → Start Live</button>
+
+    <hr />
+    
+    <h4>Debug Blendshape</h4>
+    
+    <label>
+      <input id="debugEnableInput" type="checkbox" />
+      Enable debug override
+    </label>
+    
+    <label>
+      <input id="debugAdditiveInput" type="checkbox" checked />
+      Additive over MediaPipe
+    </label>
+    
+    <label>Blendshape</label>
+    <select id="debugBlendshapeSelect"></select>
+    
+    <label>Blendshape value</label>
+    <input
+      id="debugBlendshapeValue"
+      type="range"
+      min="0"
+      max="1"
+      step="0.01"
+      value="0"
+    />
+    <span id="debugBlendshapeValueLabel">0.00</span>
+    
+    <button id="debugResetBlendshapeBtn">Reset Blendshape</button>
+    
+    <hr />
+    
+    <h4>Debug Bone</h4>
+    
+    <label>Bone</label>
+    <select id="debugBoneSelect"></select>
+    
+    <label>Rotation X</label>
+    <input id="debugBoneRotX" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+    <span id="debugBoneRotXLabel">0.00</span>
+    
+    <label>Rotation Y</label>
+    <input id="debugBoneRotY" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+    <span id="debugBoneRotYLabel">0.00</span>
+    
+    <label>Rotation Z</label>
+    <input id="debugBoneRotZ" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+    <span id="debugBoneRotZLabel">0.00</span>
+    
+    <button id="debugResetBoneBtn">Reset Bone</button>
 
     <pre id="status">Select a photo and create avatar.</pre>
   </aside>
