@@ -4,6 +4,8 @@ type BlendshapeMap = Record<string, number>;
 
 type ExportResponse = {
   avatar_id: string;
+  signature?: string;
+  cached?: string;
   zip_path: string;
   asset_url: string;
   webgl_url: string;
@@ -92,7 +94,7 @@ function normalizeBlendshapes(input: BlendshapeMap | undefined | null): Blendsha
   const out = makeNeutralBlendshapes();
 
   const RESPONSIVE_GAIN: Record<string, number> = {
-    jawOpen: 1.25,
+    jawOpen: 1.00,
     mouthSmileLeft: 1.20,
     mouthSmileRight: 1.20,
     eyeBlinkLeft: 1.35,
@@ -131,8 +133,11 @@ const avatarEl = getRequiredElement<HTMLDivElement>("avatar");
 const statusEl = getRequiredElement<HTMLPreElement>("status");
 const photoInput = getRequiredElement<HTMLInputElement>("photoInput");
 const createBtn = getRequiredElement<HTMLButtonElement>("createBtn");
+const stopBtn = getRequiredElement<HTMLButtonElement>("stopBtn");
 const blenderPathInput = document.getElementById("blenderPathInput") as HTMLInputElement | null;
 const mappingModeSelect = getRequiredElement<HTMLSelectElement>("mappingModeSelect");
+let lastStatusUiUpdate = 0;
+const STATUS_UI_INTERVAL_MS = 250;
 
 mappingModeSelect.onchange = () => {
   const mode = mappingModeSelect.value || "stable";
@@ -345,6 +350,159 @@ async function exportAvatarFromPhoto(file: File): Promise<ExportResponse> {
   return (await response.json()) as ExportResponse;
 }
 
+// -------------------------------------------------------------------
+// FPS FIX
+// -------------------------------------------------------------------
+function throttleSplatSort(sortEveryNFrames = 2) {
+  const viewer = renderer?.viewer;
+  if (!viewer || typeof viewer.runSplatSort !== "function") return;
+
+  const originalRunSplatSort = viewer.runSplatSort.bind(viewer);
+  let frame = 0;
+
+  viewer.runSplatSort = (force = false, forceSortAll = false) => {
+    frame += 1;
+
+    if (frame % sortEveryNFrames !== 0) {
+      return Promise.resolve(false);
+    }
+
+    return originalRunSplatSort(force, forceSortAll);
+  };
+
+  console.log(`[PERF] Splat sort throttled: every ${sortEveryNFrames} frames`);
+}
+
+
+
+// --------------------------------------------------------------------
+// POP-IN/OUT Animation
+// --------------------------------------------------------------------
+
+type AvatarRevealMode = "in" | "out";
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5
+    ? 4.0 * t * t * t
+    : 1.0 - Math.pow(-2.0 * t + 2.0, 3.0) / 2.0;
+}
+
+function easeInOutQuint(t: number): number {
+  return t < 0.5
+    ? 16.0 * t * t * t * t * t
+    : 1.0 - Math.pow(-2.0 * t + 2.0, 5.0) / 2.0;
+}
+
+
+function getSplatMesh(): any | null {
+  return renderer?.viewer?.splatMesh ?? null;
+}
+
+function getSplatMaxRadius(mesh: any): number {
+  return Math.max(
+    Number(mesh?.maxSplatDistanceFromSceneCenter ?? 0),
+    Number(mesh?.visibleRegionBufferRadius ?? 0),
+    Number(mesh?.visibleRegionRadius ?? 0),
+    1.0,
+  );
+}
+
+function setSplatRevealAmount(amount01: number) {
+  const mesh = getSplatMesh();
+  if (!mesh?.material?.uniforms) return;
+
+  const amount = Math.max(0.0, Math.min(1.0, amount01));
+  const maxRadius = getSplatMaxRadius(mesh);
+
+  // Deve combaciare con il valore nello shader:
+  // float fadeDistance = 0.75;
+  const fadeDistance = 1.35;
+
+  // amount=0 => tutto invisibile
+  // amount=1 => tutto visibile
+  const fadeStartRadius = -fadeDistance + (maxRadius + fadeDistance) * amount;
+
+  mesh.visibleRegionRadius = fadeStartRadius;
+  mesh.visibleRegionFadeStartRadius = fadeStartRadius;
+  mesh.visibleRegionChanging = amount < 1.0;
+
+  const uniforms = mesh.material.uniforms;
+
+  if (uniforms.visibleRegionRadius) {
+    uniforms.visibleRegionRadius.value = fadeStartRadius;
+  }
+
+  if (uniforms.visibleRegionFadeStartRadius) {
+    uniforms.visibleRegionFadeStartRadius.value = fadeStartRadius;
+  }
+
+  if (uniforms.fadeInComplete) {
+    uniforms.fadeInComplete.value = amount >= 1.0 ? 1 : 0;
+  }
+
+  if (uniforms.currentTime) {
+    uniforms.currentTime.value = performance.now();
+  }
+
+  mesh.material.uniformsNeedUpdate = true;
+}
+
+function waitForSplatMeshReady(timeoutMs = 5000): Promise<void> {
+  const start = performance.now();
+
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      const mesh = getSplatMesh();
+      const count = Number(mesh?.getSplatCount?.() ?? 0);
+
+      if (mesh && count > 0) {
+        resolve();
+        return;
+      }
+
+      if (performance.now() - start > timeoutMs) {
+        reject(new Error("Timed out waiting for splat mesh"));
+        return;
+      }
+
+      requestAnimationFrame(tick);
+    };
+
+    tick();
+  });
+}
+
+function animateSplatReveal(
+  mode: AvatarRevealMode,
+  durationMs = 1200,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const start = performance.now();
+
+    const tick = () => {
+      const elapsed = performance.now() - start;
+      const linear = Math.max(0.0, Math.min(1.0, elapsed / durationMs));
+      const eased = easeInOutQuint(linear);
+
+      const amount = mode === "in"
+        ? eased
+        : 1.0 - eased;
+
+      setSplatRevealAmount(amount);
+
+      if (linear < 1.0) {
+        requestAnimationFrame(tick);
+      } else {
+        setSplatRevealAmount(mode === "in" ? 1.0 : 0.0);
+        resolve();
+      }
+    };
+
+    tick();
+  });
+}
+
+
 async function initRenderer(assetPath: string) {
   if (ws) {
     ws.close(1000, "switch avatar");
@@ -378,6 +536,13 @@ async function initRenderer(assetPath: string) {
       getExpressionData: () => ({ ...latestBlendshapes }),
     }
   );
+
+  await waitForSplatMeshReady();
+  
+  setSplatRevealAmount(0.0);
+  await animateSplatReveal("in", 3200);
+  
+  appendStatus("Avatar reveal completed");
 
   appendStatus("Renderer ready");
   setTimeout(() => {
@@ -543,6 +708,7 @@ function connectWebSocket() {
       normalizeBlendshapes(msg.blendshapes)
     );
     const derived = msg.derived_blendshapes || {};
+    const rel = msg.reliability || {};
     latestHeadMatrix = msg.facial_matrix ?? null;
     applyHeadPose(latestHeadMatrix);
     applyDebugBoneRotation();
@@ -582,9 +748,19 @@ function connectWebSocket() {
       `drv browOuterR  : ${(derived.browOuterUpRight ?? 0).toFixed(3)}`,
       `drv browDownL   : ${(derived.browDownLeft ?? 0).toFixed(3)}`,
       `drv browDownR   : ${(derived.browDownRight ?? 0).toFixed(3)}`,
+      "=== RELIABILITY ===",
+      `jaw_eye       : ${(rel.jaw_eye ?? 1).toFixed(3)}`,
+      `derived       : ${(rel.derived ?? 1).toFixed(3)}`,
+      `pose_amount   : ${(rel.pose_amount ?? 0).toFixed(3)}`,
+      `motion_amount : ${(rel.motion_amount ?? 0).toFixed(3)}`,
     ];
 
-    setStatus(lines.join("\n"));
+    const now = performance.now();
+    
+    if (now - lastStatusUiUpdate > STATUS_UI_INTERVAL_MS) {
+      setStatus(lines.join("\n"));
+      lastStatusUiUpdate = now;
+    }
   };
 
   ws.onerror = (event) => {
@@ -597,6 +773,100 @@ function connectWebSocket() {
     ws = null;
   };
 }
+
+function animateSplatRevealOut(durationMs = 1300): Promise<void> {
+  return new Promise((resolve) => {
+    const start = performance.now();
+
+    const tick = () => {
+      if (!renderer) {
+        resolve();
+        return;
+      }
+
+      const elapsed = performance.now() - start;
+      const t = Math.max(0.0, Math.min(1.0, elapsed / durationMs));
+      const eased = easeInOutQuint(t);
+
+      setSplatRevealAmount(1.0 - eased);
+
+      if (t < 1.0) {
+        requestAnimationFrame(tick);
+      } else {
+        setSplatRevealAmount(0.0);
+        resolve();
+      }
+    };
+
+    tick();
+  });
+}
+
+let isStopping = false;
+
+async function stopTrackingAndUnloadAvatar() {
+  if (isStopping) return;
+  isStopping = true;
+
+  appendStatus("Stopping tracking...");
+
+  if (ws) {
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "stop" }));
+      }
+    } catch (err) {
+      console.warn("Could not send stop message", err);
+    }
+
+    try {
+      ws.close(1000, "user stop");
+    } catch (err) {
+      console.warn("Could not close websocket", err);
+    }
+
+    ws = null;
+  }
+
+  latestBlendshapes = makeNeutralBlendshapes();
+  latestHeadMatrix = null;
+
+  if (renderer) {
+    appendStatus("Animating avatar unload...");
+
+    try {
+      await animateSplatRevealOut(2600);
+    } catch (err) {
+      console.warn("Avatar unload animation failed", err);
+    }
+  }
+
+  if (renderer && typeof renderer.dispose === "function") {
+    try {
+      renderer.dispose();
+    } catch (err) {
+      console.warn("Renderer dispose failed", err);
+    }
+  }
+
+  renderer = null;
+  trackedBones = {};
+  neutralBoneRotations = {};
+  patchedMixer = false;
+  availableBones = [];
+
+  avatarEl.innerHTML = "";
+
+  setStatus("Stopped. Avatar unloaded.");
+
+  isStopping = false;
+}
+
+
+stopBtn.onclick = () => {
+  void stopTrackingAndUnloadAvatar();
+};
+
 
 createBtn.onclick = async () => {
   try {
@@ -612,8 +882,10 @@ createBtn.onclick = async () => {
 
     setStatus(
       [
-        "Avatar export completed.",
+        result.cached ? "Avatar loaded from cache." : "Avatar export completed.",
         `avatar_id: ${result.avatar_id}`,
+        `cached: ${Boolean(result.cached)}`,
+        `signature: ${result.signature ?? ""}`,
         `asset_url: ${result.asset_url}`,
         "",
         "Starting WebGL renderer...",
@@ -621,6 +893,7 @@ createBtn.onclick = async () => {
     );
 
     await initRenderer(result.asset_url);
+    throttleSplatSort(2);
     connectWebSocket();
   } catch (err) {
     console.error(err);

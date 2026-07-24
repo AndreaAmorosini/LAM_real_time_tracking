@@ -3,6 +3,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
+import hashlib
 
 import torch
 
@@ -12,6 +13,43 @@ def safe_avatar_id(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9_-]+", "_", name)
     return name[:64] or "avatar"
 
+OAC_EXPORT_CACHE_VERSION = "oac-v1-lam20k-addteethfalse"
+
+
+def compute_image_signature(image_bytes: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(image_bytes)
+    h.update(OAC_EXPORT_CACHE_VERSION.encode("utf-8"))
+    return h.hexdigest()
+
+
+def avatar_id_from_signature(signature: str) -> str:
+    return f"avatar_{signature[:16]}"
+
+
+def oac_zip_path_for_avatar(avatar_id: str, output_root: str = "output/open_avatar_chat") -> str:
+    return os.path.join(output_root, avatar_id + ".zip")
+
+
+def is_valid_oac_zip(zip_path: str, avatar_id: str) -> bool:
+    if not os.path.exists(zip_path):
+        return False
+
+    required = {
+        f"{avatar_id}/",
+        f"{avatar_id}/offset.ply",
+        f"{avatar_id}/skin.glb",
+        f"{avatar_id}/animation.glb",
+        f"{avatar_id}/vertex_order.json",
+    }
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = set(zf.namelist())
+    except Exception:
+        return False
+
+    return required.issubset(names)
 
 def zip_directory(source_dir: str, output_zip_path: str):
     source_dir = os.path.abspath(source_dir)

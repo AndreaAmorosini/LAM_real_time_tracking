@@ -18,8 +18,16 @@ from lam.live.debug_draw import draw_face_landmarks, draw_blendshape_debug
 from lam.live.lam_live_renderer import LAMLiveRenderer
 from lam.live.retargeting.mediapipe_to_flame import MediaPipeToFlameAdapter
 from lam.live.retargeting.landmark_derived_blendshapes import LandmarkDerivedBlendshapes
+from lam.live.retargeting.head_pose_reliability import HeadPoseReliability
 from lam.live.source_preprocessor import LAMSourcePreprocessor
-from lam.live.oac_exporter import export_oac_zip_from_live_renderer, safe_avatar_id
+from lam.live.oac_exporter import (
+    export_oac_zip_from_live_renderer,
+    safe_avatar_id,
+    compute_image_signature,
+    avatar_id_from_signature,
+    oac_zip_path_for_avatar,
+    is_valid_oac_zip,
+)
 from vhap.model import flame
 
 
@@ -353,8 +361,8 @@ LANDMARK_DERIVED_OVERRIDE_NAMES = {
     "cheekSquintLeft",
     "cheekSquintRight",
     "cheekPuff",
-    "mouthUpperUpLeft",
-    "mouthUpperUpRight",
+    # "mouthUpperUpLeft",
+    # "mouthUpperUpRight",
     #Questi tre opzionali per maggiore espressività, ma non sempre affidabili.
     "eyeWideLeft",
     "eyeWideRight",
@@ -506,7 +514,7 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "jawForward": 0.06,
         "jawLeft": 0.05,
         "jawRight": 0.05,
-        "jawOpen": 0.07,
+        "jawOpen": 0.04,
 
         # Mouth
         "mouthClose": 0.05,
@@ -569,7 +577,7 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "jawForward": 0.30,
         "jawLeft": 0.45,
         "jawRight": 0.45,
-        "jawOpen": 0.45,
+        "jawOpen": 0.70,
 
         # Mouth
         "mouthClose": 0.40,
@@ -602,8 +610,10 @@ def postprocess_webgl_blendshapes_stable_live(b):
 
     jaw = b.get("jawOpen", 0.0)
     
-    if jaw < 0.08:
+    if jaw < 0.04:
         b["jawOpen"] = 0.0
+
+    b["jawOpen"] = min(b.get("jawOpen", 0.0), 0.62)
 
     # Derived/proxy nose and cheek expressions.
     # MediaPipe often keeps noseSneer/cheekSquint/cheekPuff at 0.
@@ -832,7 +842,15 @@ def head_motion_factor(tracking):
     return 1.0 * (1.0 - t) + 0.25 * t
 
 
-def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: float, mapping_mode: str = "stable", landmark_derived=None):
+def build_webgl_payload(
+    tracking,
+    status: str, 
+    fps_capture: float, 
+    fps_sent: float, 
+    mapping_mode: str = "stable", 
+    landmark_derived=None,
+    head_reliability=None
+):
     blendshapes = {name: 0.0 for name in ARKIT_BLENDSHAPE_NAMES}
     if tracking is not None and tracking.detected:
         for name, value in tracking.blendshapes.items():
@@ -840,50 +858,80 @@ def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: flo
                 blendshapes[name] = float(value)
 
     derived_blendshapes = {}
+    reliability = {
+        "jaw_eye": 1.0,
+        "derived": head_motion_factor(tracking),
+        "pose_amount": 0.0,
+        "motion_amount": 0.0,
+    }
+
+    if head_reliability is not None:
+        reliability = head_reliability.update(tracking)
+
     if landmark_derived is not None:
         derived_blendshapes = landmark_derived.derive(tracking)
-        derived_factor = head_motion_factor(tracking)
+    
+        jaw_eye_factor = float(reliability.get("jaw_eye", 1.0))
+        derived_factor = float(reliability.get("derived", 1.0))
+    
         for name, value in derived_blendshapes.items():
-            # if name in blendshapes and name in LANDMARK_DERIVED_OVERRIDE_NAMES:
-            #     value = float(value) * derived_factor
-            #     blendshapes[name] = max(blendshapes.get(name, 0.0), float(value))
-            if name not in blendshapes or name not in LANDMARK_DERIVED_OVERRIDE_NAMES:
+            if name not in blendshapes:
                 continue
-
+    
+            if name not in LANDMARK_DERIVED_OVERRIDE_NAMES:
+                continue
+    
             raw_value = float(blendshapes.get(name, 0.0))
             derived_value = float(value)
-
-            if name in {"jawOpen", "eyeWideLeft", "eyeWideRight"}:
-                    if derived_factor < 0.85:
-                        continue
-        
-            # Apply global head-pose gating to derived landmarks.
-            derived_value *= derived_factor
     
             if name == "jawOpen":
-                raw = raw_value
-                drv = derived_value
+                factor = jaw_eye_factor
             
-                jaw = max(drv * 0.65, raw * 0.25)
-                
-                if jaw < 0.24:
+                if factor <= 0.05:
+                    jaw = raw_value
+                else:
+                    # Derived aiuta, ma non domina.
+                    derived_shaped = max(0.0, min(1.0, derived_value)) ** 1.35
+                    derived_weight = 0.45 * factor
+            
+                    jaw = raw_value * (1.0 - derived_weight) + derived_shaped * derived_weight
+            
+                    # Preserva sempre almeno il raw MediaPipe.
+                    jaw = max(raw_value, jaw)
+            
+                if jaw < 0.04:
                     jaw = 0.0
-
-                jaw = min(jaw, 0.55)
+            
+                jaw = min(jaw, 0.62)
             
                 blendshapes["jawOpen"] = jaw
                 continue
     
             if name in {"eyeWideLeft", "eyeWideRight"}:
-                # Use derived eyeWide only when clearly active.
-                if derived_value > 0.15:
-                    blendshapes[name] = max(raw_value, derived_value)
+                factor = jaw_eye_factor
+    
+                if factor <= 0.05:
+                    wide = raw_value
                 else:
-                    blendshapes[name] = raw_value
+                    wide = raw_value * (1.0 - factor) + derived_value * factor
+    
+                if wide < 0.08:
+                    wide = 0.0
+    
+                wide = min(wide, 0.85)
+    
+                blendshapes[name] = wide
                 continue
     
-            # Default behavior for brows/nose/cheeks.
-            blendshapes[name] = max(raw_value, derived_value)
+            # All other landmark-derived params also get gated.
+            # Brows/nose/cheeks use a softer factor than jaw/eyes.
+            derived_value *= derived_factor
+    
+            # If factor is very low, use MediaPipe raw only.
+            if derived_factor <= 0.05:
+                blendshapes[name] = raw_value
+            else:
+                blendshapes[name] = max(raw_value, derived_value)
 
     blendshapes["mouthCheekPuff"] = blendshapes.get("cheekPuff", 0.0)
     blendshapes = postprocess_webgl_blendshapes(blendshapes, mode=mapping_mode)
@@ -903,6 +951,7 @@ def build_webgl_payload(tracking, status: str, fps_capture: float, fps_sent: flo
         "status": status,
         "derived_blendshapes": derived_blendshapes,
         "derived_factor": head_motion_factor(tracking),
+        "reliability": reliability
     }
 
 @app.get("/")
@@ -1049,22 +1098,40 @@ async def export_oac_from_image(
     blender_path: Optional[str] = Form(None),
 ):
     upload_dir = "output/live_uploads"
+    oac_output_root = "output/open_avatar_chat"
+    
     os.makedirs(upload_dir, exist_ok=True)
-
+    os.makedirs(oac_output_root, exist_ok=True)
+    
     if not blender_path or blender_path.strip() in ["", "/path/to/blender"]:
         blender_path = os.environ.get("LAM_BLENDER_PATH", "blender")
-
+    
     ext = os.path.splitext(image.filename or "")[1].lower()
     if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
         ext = ".png"
-
-    avatar_id = safe_avatar_id(image.filename or f"avatar_{uuid.uuid4().hex[:8]}")
-    avatar_id = f"{avatar_id}_{uuid.uuid4().hex[:8]}"
-
+    
+    image_bytes = await image.read()
+    
+    signature = compute_image_signature(image_bytes)
+    avatar_id = avatar_id_from_signature(signature)
+    zip_path = oac_zip_path_for_avatar(avatar_id, output_root=oac_output_root)
+    
+    # Cache hit: return existing valid avatar.
+    if is_valid_oac_zip(zip_path, avatar_id):
+        zip_name = os.path.basename(zip_path)
+        return {
+            "avatar_id": avatar_id,
+            "signature": signature,
+            "cached": True,
+            "zip_path": zip_path,
+            "asset_url": f"/oac_assets/{zip_name}",
+            "webgl_url": f"/webgl/?asset=/oac_assets/{zip_name}",
+        }
+    
     raw_image_path = os.path.join(upload_dir, avatar_id + ext)
-
+    
     with open(raw_image_path, "wb") as f:
-        f.write(await image.read())
+        f.write(image_bytes)
 
     preprocessor = LAMSourcePreprocessor(
         output_dir="tracking_output_live",
@@ -1112,6 +1179,8 @@ async def export_oac_from_image(
 
     return {
         "avatar_id": avatar_id,
+        "signature": signature,
+        "cached": False,
         "zip_path": zip_path,
         "asset_url": f"/oac_assets/{zip_name}",
         "webgl_url": f"/webgl/?asset=/oac_assets/{zip_name}",
@@ -1156,6 +1225,7 @@ async def live_ws(websocket: WebSocket):
 
     provider: Optional[LiveMotionProvider] = None
     lam_renderer: Optional[LAMLiveRenderer] = None
+    head_reliability = HeadPoseReliability()
     
     source_betas = torch.zeros(10)
     
@@ -1306,7 +1376,8 @@ async def live_ws(websocket: WebSocket):
                     fps_capture=fps_capture,
                     fps_sent=fps_sent,
                     mapping_mode=mapping_mode,
-                    landmark_derived=landmark_derived
+                    landmark_derived=landmark_derived,
+                    head_reliability=head_reliability
                 )
 
                 send_ok = await safe_send_json(websocket, payload)

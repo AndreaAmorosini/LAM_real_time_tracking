@@ -72,6 +72,21 @@ class LandmarkDerivedBlendshapes:
         self.values[key] = value
         return value
 
+    def _xyz(self, landmarks, idx):
+        lm = landmarks[idx]
+        return float(lm.x), float(lm.y), float(getattr(lm, "z", 0.0))
+
+    def _dist3(self, landmarks, a, b, z_weight=0.5):
+        ax, ay, az = self._xyz(landmarks, a)
+        bx, by, bz = self._xyz(landmarks, b)
+
+        dx = ax - bx
+        dy = ay - by
+        dz = (az - bz) * z_weight
+
+        return (dx * dx + dy * dy + dz * dz) ** 0.5
+
+
     def derive(self, tracking):
         if tracking is None or not tracking.detected or tracking.landmarks is None:
             return {}
@@ -131,30 +146,40 @@ class LandmarkDerivedBlendshapes:
         )
 
         # ------------------------------------------------------------------
-        # EYE WIDE - eye-opening normalized by eye width
+        # EYE WIDE - local 3D eye-opening normalized by local eye width
         # ------------------------------------------------------------------
 
-        left_eye_wi = self._dist(lms, 33, 133)
-        right_eye_wi = self._dist(lms, 362, 263)
-        left_eye_open = self._dist(lms, 159, 145) / max(left_eye_wi, 1e-6)
-        right_eye_open = self._dist(lms, 386, 374) / max(right_eye_wi, 1e-6)
+        left_eye_wi = self._dist3(lms, 33, 133)
+        right_eye_wi = self._dist3(lms, 362, 263)
 
-        wide_l = self._calibrated_delta("eyeWideLeft_lm", left_eye_open, True, gain=3.2)
-        wide_r = self._calibrated_delta("eyeWideRight_lm", right_eye_open, True, gain=3.2)
-        
-        # Rest clamp
-        wide_deadzone = 0.12
-        
+        left_eye_open = self._dist3(lms, 159, 145) / max(left_eye_wi, 1e-6)
+        right_eye_open = self._dist3(lms, 386, 374) / max(right_eye_wi, 1e-6)
+
+        wide_l = self._calibrated_delta(
+            "eyeWideLeft_lm",
+            left_eye_open,
+            True,
+            gain=3.0,
+        )
+        wide_r = self._calibrated_delta(
+            "eyeWideRight_lm",
+            right_eye_open,
+            True,
+            gain=3.0,
+        )
+
+        wide_deadzone = 0.14
+
         if wide_l < wide_deadzone:
             wide_l = 0.0
         else:
             wide_l = (wide_l - wide_deadzone) / (1.0 - wide_deadzone)
-        
+
         if wide_r < wide_deadzone:
             wide_r = 0.0
         else:
             wide_r = (wide_r - wide_deadzone) / (1.0 - wide_deadzone)
-        
+
         out["eyeWideLeft"] = max(0.0, min(1.0, wide_l))
         out["eyeWideRight"] = max(0.0, min(1.0, wide_r))
         
@@ -208,17 +233,27 @@ class LandmarkDerivedBlendshapes:
         # Use for logging/debug; avoid override if head pose causes artifacts.
         # ------------------------------------------------------------------
 
-        mouth_w = self._dist(lms, 61, 291)
-        mouth_open = self._dist(lms, 13, 14) / max(mouth_w, 1e-6)
-        
-        jaw = self._calibrated_delta("jawOpen_lm", mouth_open, True, gain=2.2)
-        if jaw < 0.16:
+        mouth_w = self._dist3(lms, 61, 291)
+        mouth_open = self._dist3(lms, 13, 14) / max(mouth_w, 1e-6)
+
+        jaw = self._calibrated_delta(
+            "jawOpen_lm",
+            mouth_open,
+            True,
+            gain=2.45,
+        )
+
+        # Local rest clamp. This should remove small lip-distance residuals.
+        jaw_deadzone = 0.18
+
+        if jaw < jaw_deadzone:
             jaw = 0.0
         else:
-            jaw = (jaw - 0.16) / (1.0 - 0.16)
-        
+            jaw = (jaw - jaw_deadzone) / (1.0 - jaw_deadzone)
+            jaw = jaw ** 1.35
+
         out["jawOpen"] = max(0.0, min(1.0, jaw))
-        
+
         # Smile/frown: corners moving up/down relative to neutral.
         # y smaller = up, y larger = down.
         left_corner_up_metric = -left_corner_y / scale
@@ -370,6 +405,14 @@ class LandmarkDerivedBlendshapes:
         )
 
         for k in list(out.keys()):
-            out[k] = self._smooth(k, out[k])
+            if k == "jawOpen":
+                out[k] = self._smooth_asymmetric(
+                    k,
+                    out[k],
+                    alpha_open=0.65,
+                    alpha_close=0.85,
+                )
+            else:
+                out[k] = self._smooth(k, out[k])
 
         return out
