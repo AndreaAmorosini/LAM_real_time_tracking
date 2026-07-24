@@ -361,13 +361,28 @@ LANDMARK_DERIVED_OVERRIDE_NAMES = {
     "cheekSquintLeft",
     "cheekSquintRight",
     "cheekPuff",
-    # "mouthUpperUpLeft",
-    # "mouthUpperUpRight",
     #Questi tre opzionali per maggiore espressività, ma non sempre affidabili.
     "eyeWideLeft",
     "eyeWideRight",
-    "jawOpen"
+    "jawOpen",
+    #Per il parlato
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthPucker",
+    "mouthFunnel",
+    "mouthStretchLeft",
+    "mouthStretchRight",
 }
+
+SPEECH_DERIVED_OVERRIDE_NAMES = {
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthPucker",
+    "mouthFunnel",
+    "mouthStretchLeft",
+    "mouthStretchRight",
+}
+
 
 
 WEBGL_ALL_VALID_BLENDSHAPES = {
@@ -439,15 +454,37 @@ def _clamp_all(b):
 
 
 def _apply_common_conflicts(b):
-    # jawOpen vs mouthClose
-    if b.get("jawOpen", 0.0) > 0.10:
-        b["mouthClose"] = 0.0
+    jaw = b.get("jawOpen", 0.0)
+    
+    if jaw > 0.06:
+        # Gradually reduce mouthClose during speech instead of hard switching late.
+        reduction = max(0.0, min(1.0, (jaw - 0.06) / 0.12))
+        b["mouthClose"] *= 1.0 - reduction
 
     # pucker/funnel compete but do not fully cancel.
-    if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
-        b["mouthFunnel"] *= 0.45
-    else:
-        b["mouthPucker"] *= 0.45
+    # if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
+    #     b["mouthFunnel"] *= 0.45
+    # else:
+    #     b["mouthPucker"] *= 0.45
+
+    pucker = b.get("mouthPucker", 0.0)
+    funnel = b.get("mouthFunnel", 0.0)
+    
+    # Allow O/U to combine pucker and funnel.
+    # Only reduce the weaker one when one shape clearly dominates.
+    if pucker > funnel * 1.35:
+        b["mouthFunnel"] *= 0.75
+    elif funnel > pucker * 1.35:
+        b["mouthPucker"] *= 0.75
+
+    rounding = max(
+        b.get("mouthPucker", 0.0),
+        b.get("mouthFunnel", 0.0),
+    )
+    
+    if rounding > 0.06:
+        reduction = max(0.0, min(1.0, rounding / 0.35))
+        b["mouthClose"] *= 1.0 - reduction * 0.75
 
     # MediaPipe cheekPuff compatibility alias.
     b["mouthCheekPuff"] = max(
@@ -522,22 +559,22 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "mouthDimpleRight": 0.035,
         "mouthFrownLeft": 0.04,
         "mouthFrownRight": 0.04,
-        "mouthFunnel": 0.05,
+        "mouthFunnel": 0.035,
         "mouthLeft": 0.05,
         "mouthRight": 0.05,
-        "mouthLowerDownLeft": 0.04,
-        "mouthLowerDownRight": 0.04,
+        "mouthLowerDownLeft": 0.025,
+        "mouthLowerDownRight": 0.025,
         "mouthPressLeft": 0.05,
         "mouthPressRight": 0.05,
-        "mouthPucker": 0.05,
+        "mouthPucker": 0.035,
         "mouthRollLower": 0.05,
         "mouthRollUpper": 0.05,
         "mouthShrugLower": 0.05,
         "mouthShrugUpper": 0.05,
         "mouthSmileLeft": 0.025,
         "mouthSmileRight": 0.025,
-        "mouthStretchLeft": 0.03,
-        "mouthStretchRight": 0.03,
+        "mouthStretchLeft": 0.025,
+        "mouthStretchRight": 0.025,
         "mouthUpperUpLeft": 0.04,
         "mouthUpperUpRight": 0.04,
     }
@@ -585,14 +622,14 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "mouthDimpleRight": 1.0,
         "mouthFrownLeft": 0.9,
         "mouthFrownRight": 0.9,
-        "mouthFunnel": 0.70,
+        "mouthFunnel": 1.00,
         "mouthLeft": 0.65,
         "mouthRight": 0.65,
-        "mouthLowerDownLeft": 0.70,
-        "mouthLowerDownRight": 0.70,
+        "mouthLowerDownLeft": 0.85,
+        "mouthLowerDownRight": 0.85,
         "mouthPressLeft": 0.55,
         "mouthPressRight": 0.55,
-        "mouthPucker": 0.70,
+        "mouthPucker": 1.00,
         "mouthRollLower": 0.45,
         "mouthRollUpper": 0.45,
         "mouthShrugLower": 0.55,
@@ -612,7 +649,7 @@ def postprocess_webgl_blendshapes_stable_live(b):
     
     if jaw < 0.04:
         b["jawOpen"] = 0.0
-
+    
     b["jawOpen"] = min(b.get("jawOpen", 0.0), 0.62)
 
     # Derived/proxy nose and cheek expressions.
@@ -890,14 +927,13 @@ def build_webgl_payload(
                 if factor <= 0.05:
                     jaw = raw_value
                 else:
-                    # Derived aiuta, ma non domina.
                     derived_shaped = max(0.0, min(1.0, derived_value)) ** 1.35
-                    derived_weight = 0.45 * factor
+                    derived_weight = 0.40 * factor
             
                     jaw = raw_value * (1.0 - derived_weight) + derived_shaped * derived_weight
             
-                    # Preserva sempre almeno il raw MediaPipe.
-                    jaw = max(raw_value, jaw)
+                    # Preserve raw MediaPipe. Derived should help, not dominate.
+                    jaw = max(raw_value * 0.95, jaw)
             
                 if jaw < 0.04:
                     jaw = 0.0
@@ -922,6 +958,50 @@ def build_webgl_payload(
     
                 blendshapes[name] = wide
                 continue
+
+            if name in SPEECH_DERIVED_OVERRIDE_NAMES:
+                mouth_factor = max(
+                    0.0,
+                    min(1.0, 0.65 * jaw_eye_factor + 0.35 * derived_factor),
+                )
+            
+                derived_mouth = derived_value * mouth_factor
+            
+                if name in {"mouthLowerDownLeft", "mouthLowerDownRight"}:
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.55 + derived_mouth * 0.45,
+                        derived_mouth * 0.70,
+                    )
+                    blendshapes[name] = min(value_out, 0.45)
+                    continue
+            
+                if name == "mouthPucker":
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.45 + derived_mouth * 0.55,
+                        derived_mouth * 0.90,
+                    )
+                    blendshapes[name] = min(value_out, 0.75)
+                    continue
+                
+                if name == "mouthFunnel":
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.45 + derived_mouth * 0.55,
+                        derived_mouth * 0.90,
+                    )
+                    blendshapes[name] = min(value_out, 0.70)
+                    continue
+            
+                if name in {"mouthStretchLeft", "mouthStretchRight"}:
+                    value_out = max(
+                        raw_value,
+                        derived_mouth * 0.75,
+                    )
+                    blendshapes[name] = min(value_out, 0.55)
+                    continue
+
     
             # All other landmark-derived params also get gated.
             # Brows/nose/cheeks use a softer factor than jaw/eyes.

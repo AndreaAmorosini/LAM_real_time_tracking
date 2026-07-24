@@ -24,6 +24,13 @@ class LandmarkDerivedBlendshapes:
         self.values[key] = value
         return value
 
+    def _smoothstep(self, edge0, edge1, x):
+        if edge1 <= edge0:
+            return 0.0
+        t = (float(x) - edge0) / (edge1 - edge0)
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
+
     def _calibrated_delta(self, key, current, positive_when_larger=True, gain=1.0):
         if self.frame_count < self.neutral_frames:
             old = self.neutral.get(key, current)
@@ -43,6 +50,31 @@ class LandmarkDerivedBlendshapes:
         if abs(b) < 1e-6:
             return fallback
         return a / b
+
+    def _speech_curve(self, x):
+        """
+        Soft-knee curve for speech mouth opening.
+    
+        Goal:
+        - small speech movements become visible
+        - medium openings remain controlled
+        - large openings do not saturate immediately
+        """
+        x = max(0.0, min(1.0, float(x)))
+    
+        if x < 0.07:
+            return 0.0
+    
+        if x < 0.25:
+            t = (x - 0.07) / (0.25 - 0.07)
+            return t * 0.18
+    
+        if x < 0.60:
+            t = (x - 0.25) / (0.60 - 0.25)
+            return 0.18 + t * 0.30
+    
+        return min(0.62, 0.48 + (x - 0.60) * 0.25)
+
 
     def _eye_width_left(self, landmarks):
         return max(self._dist(landmarks, 33, 133), 1e-6)
@@ -235,24 +267,41 @@ class LandmarkDerivedBlendshapes:
 
         mouth_w = self._dist3(lms, 61, 291)
         mouth_open = self._dist3(lms, 13, 14) / max(mouth_w, 1e-6)
-
-        jaw = self._calibrated_delta(
+        
+        # Speech-specific signal: sensitive to small lip openings,
+        # but shaped by a soft-knee curve so it does not explode.
+        speech_raw = self._calibrated_delta(
+            "speechOpen_lm",
+            mouth_open,
+            True,
+            gain=2.35,
+        )
+        
+        speech_open = self._speech_curve(speech_raw)
+        
+        # Bigger jaw signal: slower and more conservative.
+        big_jaw_raw = self._calibrated_delta(
             "jawOpen_lm",
             mouth_open,
             True,
-            gain=2.45,
+            gain=1.75,
         )
-
-        # Local rest clamp. This should remove small lip-distance residuals.
-        jaw_deadzone = 0.18
-
-        if jaw < jaw_deadzone:
-            jaw = 0.0
+        
+        big_jaw_deadzone = 0.20
+        
+        if big_jaw_raw < big_jaw_deadzone:
+            big_jaw = 0.0
         else:
-            jaw = (jaw - jaw_deadzone) / (1.0 - jaw_deadzone)
-            jaw = jaw ** 1.35
-
-        out["jawOpen"] = max(0.0, min(1.0, jaw))
+            big_jaw = (big_jaw_raw - big_jaw_deadzone) / (1.0 - big_jaw_deadzone)
+            big_jaw = big_jaw ** 1.45
+        
+        jaw = max(
+            speech_open * 0.85,
+            big_jaw,
+        )
+        
+        out["speechOpen"] = max(0.0, min(1.0, speech_open))
+        out["jawOpen"] = max(0.0, min(0.75, jaw))
 
         # Smile/frown: corners moving up/down relative to neutral.
         # y smaller = up, y larger = down.
@@ -303,14 +352,78 @@ class LandmarkDerivedBlendshapes:
         )
 
         # Pucker/funnel proxy: mouth width decreasing.
-        pucker = self._calibrated_delta(
-            "mouthPucker_lm",
+        # pucker = self._calibrated_delta(
+        #     "mouthPucker_lm",
+        #     mouth_width_norm,
+        #     False,
+        #     gain=5.0,
+        # )
+        # out["mouthPucker"] = pucker
+        # out["mouthFunnel"] = pucker * 0.65
+
+        # ------------------------------------------------------------------
+        # O / U vowel proxy
+        # ------------------------------------------------------------------
+        # O: mouth is rounded AND visibly open -> mostly mouthFunnel.
+        # U: mouth is rounded/narrow but not very open -> mostly mouthPucker.
+        #
+        # Note: true lip protrusion is hard from webcam landmarks, so this uses
+        # mouth width narrowing + mouth opening as an approximation.
+        
+        mouth_narrow = self._calibrated_delta(
+            "mouthNarrow_lm",
             mouth_width_norm,
             False,
-            gain=5.0,
+            gain=4.2,
         )
-        out["mouthPucker"] = pucker
-        out["mouthFunnel"] = pucker * 0.65
+        
+        mouth_narrow = max(0.0, min(1.0, mouth_narrow))
+        
+        # speech_open should already be computed in the jawOpen section.
+        # If not available for any reason, fallback safely.
+        speech = float(out.get("speechOpen", 0.0))
+        
+        open_gate_o = self._smoothstep(0.08, 0.32, speech)
+        narrow_gate = self._smoothstep(0.05, 0.35, mouth_narrow)
+        
+        # O shape: rounded + open.
+        vowel_o = (
+            mouth_narrow * 0.65 +
+            speech * 0.55
+        ) * open_gate_o * narrow_gate
+        
+        # U shape: rounded/narrow, but with lower opening.
+        u_open_suppression = 1.0 - self._smoothstep(0.20, 0.48, speech)
+        vowel_u = mouth_narrow * u_open_suppression
+        
+        vowel_o = max(0.0, min(1.0, vowel_o))
+        vowel_u = max(0.0, min(1.0, vowel_u))
+        
+        # ARKit mapping:
+        # O -> mostly funnel, some pucker
+        # U -> mostly pucker, small funnel
+        out["mouthFunnel"] = max(
+            out.get("mouthFunnel", 0.0),
+            vowel_o * 0.90,
+            vowel_u * 0.30,
+        )
+        
+        out["mouthPucker"] = max(
+            out.get("mouthPucker", 0.0),
+            vowel_u * 0.95,
+            vowel_o * 0.35,
+        )
+        
+        # O needs some jaw/lower opening, U should not force much jaw.
+        out["jawOpen"] = max(
+            out.get("jawOpen", 0.0),
+            vowel_o * 0.28,
+        )
+        
+        # Debug-only derived values.
+        out["mouthNarrow"] = mouth_narrow
+        out["vowelO"] = vowel_o
+        out["vowelU"] = vowel_u
 
         # Mouth left/right: center displacement.
         out["mouthLeft"] = self._calibrated_delta(
@@ -346,18 +459,23 @@ class LandmarkDerivedBlendshapes:
         left_lower_lip_y = self._mean_y(lms, [84, 85, 86])
         right_lower_lip_y = self._mean_y(lms, [314, 315, 316])
 
-        out["mouthLowerDownLeft"] = self._calibrated_delta(
+        lower_down_l = self._calibrated_delta(
             "mouthLowerDownLeft_lm",
             left_lower_lip_y / scale,
             True,
-            gain=4.0,
+            gain=3.2,
         )
-        out["mouthLowerDownRight"] = self._calibrated_delta(
+        
+        lower_down_r = self._calibrated_delta(
             "mouthLowerDownRight_lm",
             right_lower_lip_y / scale,
             True,
-            gain=4.0,
+            gain=3.2,
         )
+        
+        # Speech proxy: when the mouth opens for speech, pull lower lip slightly down.
+        out["mouthLowerDownLeft"] = max(lower_down_l, speech_open * 0.35)
+        out["mouthLowerDownRight"] = max(lower_down_r, speech_open * 0.35)
 
         # ------------------------------------------------------------------
         # CHEEK / ZYGOMA - local lower-eye-to-cheek compression
@@ -404,15 +522,29 @@ class LandmarkDerivedBlendshapes:
             out.get("mouthFunnel", 0.0) * 0.25,
         )
 
+        speech_keys = {
+            "speechOpen",
+            "jawOpen",
+            "mouthLowerDownLeft",
+            "mouthLowerDownRight",
+            "mouthPucker",
+            "mouthFunnel",
+            "mouthStretchLeft",
+            "mouthStretchRight",
+            "mouthNarrow",
+            "vowelO",
+            "vowelU",
+        }
+        
         for k in list(out.keys()):
-            if k == "jawOpen":
+            if k in speech_keys:
                 out[k] = self._smooth_asymmetric(
                     k,
                     out[k],
-                    alpha_open=0.65,
-                    alpha_close=0.85,
+                    alpha_open=0.70,
+                    alpha_close=0.78,
                 )
             else:
                 out[k] = self._smooth(k, out[k])
-
+                
         return out
