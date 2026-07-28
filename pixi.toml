@@ -19,6 +19,9 @@ ffmpeg = "*"
 zip = "*"
 unzip = "*"
 nodejs="*"
+wget = "*"
+tar = "*"
+xz = "*"
 
 # Toolchain utile per compilare pytorch3d, nvdiffrast, simple-knn e diff-gaussian-rasterization
 gcc_linux-64 = "11.*"
@@ -31,143 +34,74 @@ cuda-nvcc = "12.1.*"
 cuda-cudart-dev = "*"
 cuda-libraries-dev = "*"
 cuda-cccl = "*"
+
 [tasks]
+
+# ---------------------------------------------------------------------
+# One-command setup
+# ---------------------------------------------------------------------
+
+setup-all = "bash scripts/live-install/pixi-setup-all.sh"
+fix-scripts-permissions = "bash scripts/live-install/fix-script-permission.sh"
+
+# ---------------------------------------------------------------------
+# Setup substeps
+# ---------------------------------------------------------------------
+
+setup-python-base = "bash scripts/live-install/setup/setup-python-base.sh"
+setup-torch-cu121 = "bash scripts/live-install/setup/setup-torch-cu121.sh"
+setup-live = "bash scripts/live-install/setup/setup-live.sh"
+setup-cuda-ext = "bash scripts/pixi-install-cuda-ext.sh"
+
+# Downloads
+setup-weights = "bash scripts/live-install/setup/setup-weights.sh"
+setup-faceboxes = "bash scripts/live-install/setup/setup-faceboxes.sh"
+setup-mediapipe-model = "bash scripts/live-install/setup/setup-mediapipe-model.sh"
+
+# Blender / FBX
+setup-blender = "bash scripts/live-install/setup/setup-blender.sh"
+setup-fbx-sdk = "bash scripts/live-install/setup/setup-fbx-sdk.sh"
+
+# Frontend
+setup-webgl = "npm --prefix webgl_frontend install"
+webgl-build = "npm --prefix webgl_frontend run build"
+webgl-dev = "npm --prefix webgl_frontend run dev --host 127.0.0.1 --port 5173"
+
+# ---------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------
+
+doctor = "bash scripts/live-install/pixi-doctor.sh"
+
 check-gpu = """
 python -c "import torch; print('torch:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('torch cuda:', torch.version.cuda); print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
 """
 
-install-torch-cu121 = """
-python -m pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu121
-python -m pip install -U xformers==0.0.26.post1 --index-url https://download.pytorch.org/whl/cu121
-"""
+check-blender = "thirdparties/blender/blender-4.0.2-linux-x64/blender --version"
 
-install-base = """
-python -m pip install -U pip setuptools wheel
-python -m pip install "numpy==1.23.0" scipy six
-python -m pip install --no-build-isolation git+https://github.com/mattloper/chumpy.git
-python -m pip install -r requirements-lam-base.txt
-"""
-
-install-cuda-ext = "bash scripts/pixi-install-cuda-ext.sh"
-
-debug-build-env = "bash -lc 'echo CONDA_PREFIX=$CONDA_PREFIX; echo PIXI_ENV_PREFIX=${PIXI_ENV_PREFIX:-}; which python; which nvcc || true; which x86_64-conda-linux-gnu-cc || true; which x86_64-conda-linux-gnu-c++ || true; which x86_64-conda-linux-gnu-g++ || true; python -c \"import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())\"'"
-
-build-faceboxes = """
-cd external/landmark_detection/FaceBoxesV2/utils
-python build.py build_ext --inplace
-"""
-
-download-weights-hf = """
-mkdir -p tmp
-huggingface-cli download 3DAIGC/LAM-assets --local-dir ./tmp
-tar -xf ./tmp/LAM_assets.tar
-rm ./tmp/LAM_assets.tar
-tar -xf ./tmp/thirdparty_models.tar
-rm -rf ./tmp
-mkdir -p ./model_zoo/lam_models/releases/lam/lam-20k/step_045500/
-huggingface-cli download 3DAIGC/LAM-20K --local-dir ./model_zoo/lam_models/releases/lam/lam-20k/step_045500/
-"""
-
-app = "bash scripts/pixi-run-app.sh"
-
-app-public = "bash scripts/pixi-run-app.sh"
-
-infer-sample = """
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python -m lam.launch infer.lam \
-  --config configs/inference/lam-20k-8gpu.yaml \
-  model_name=./model_zoo/lam_models/releases/lam/lam-20k/step_045500/ \
-  image_input=assets/sample_input/status.png \
-  motion_seqs_dir=assets/sample_motion/export/Look_In_My_Eyes/ \
-  export_video=true export_mesh=false save_ply=false save_img=false \
-  vis_motion=false motion_img_need_mask=true render_fps=30 motion_video_read_fps=30 \
-  cross_id=false test_sample=false rank=0 nodes=0
-"""
-
-
-#LIVE TRACKING tasks
-install-live = """
-python -m pip install "numpy==1.23.0"
-python -m pip install "mediapipe==0.10.14"
-python -m pip install "websockets"
-python -m pip install "gradio==3.44.3" "fastapi==0.103.2" "starlette==0.27.0" "pydantic==1.10.15" "uvicorn==0.23.2" "anyio==3.7.1"
-python -m pip install --no-deps --force-reinstall "transformers==4.41.2"
-python -m pip install --no-deps --force-reinstall "tokenizers==0.19.1"
-python -m pip install --no-deps --force-reinstall "huggingface_hub==0.23.2"
-python -m pip install --force-reinstall "numpy==1.23.0"
-python -c "import torch; import transformers; from transformers.utils import is_torch_available; print('torch', torch.__version__); print('transformers', transformers.__version__); print('is_torch_available', is_torch_available())"
-python -m pip check || true
-"""
-download-mediapipe-model = "mkdir -p model_zoo/mediapipe && python -c \"import urllib.request; url='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task'; out='model_zoo/mediapipe/face_landmarker.task'; urllib.request.urlretrieve(url, out); print('saved', out)\""
-
-test-webcam = """
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-python -m lam.live.camera
-"""
-
-test-mediapipe = """
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-python -m lam.live.trackers.mediapipe_face_tracker
-"""
-
-test-live-motion = """
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-python -m lam.live.live_motion
-"""
-
-test-flame-adapter = """
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-python -m lam.live.retargeting.mediapipe_to_flame
-"""
-
-install-live-opencv = """
-python -m pip uninstall -y opencv-python-headless
-python -m pip install opencv-python==4.11.0.86
-python -m pip install --force-reinstall "numpy==1.23.0"
-"""
-
-
-test-source-preprocess = """
-bash -lc '
-export CUDA_HOME="$CONDA_PREFIX"
-export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPATH:-}"
-export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
-export C_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${C_INCLUDE_PATH:-}"
-export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
-export TORCH_CUDA_ARCH_LIST="8.9"
-PYTHONPATH=. python -c "from lam.live.source_preprocessor import LAMSourcePreprocessor; p=LAMSourcePreprocessor(); print(p.preprocess(\\\"assets/sample_input/status.png\\\"))"
-'
-"""
-
-app-live-opencv = "PYTHONPATH=. python -m lam.live.apps.opencv_debug"
+# ---------------------------------------------------------------------
+# Apps
+# ---------------------------------------------------------------------
 
 app-live-web = """
 bash -lc '
-export LAM_BLENDER_PATH="$PWD/thirdparties/blender/blender-4.0.2-linux-x64/blender"
+export LAM_BLENDER_PATH="${LAM_BLENDER_PATH:-$PWD/thirdparties/blender/blender-4.0.2-linux-x64/blender}"
 export CUDA_HOME="$CONDA_PREFIX"
 export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPATH:-}"
 export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
 export C_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${C_INCLUDE_PATH:-}"
 export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
-export TORCH_CUDA_ARCH_LIST="8.9"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 PYTHONPATH=. python app_live_web.py
 '
 """
 
+# ---------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------
 
-# ------------------------- NEW VERSION WITH WEB GL --------------------------------
-
-install-fbx-sdk = """
-wget -O /tmp/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl https://virutalbuy-public.oss-cn-hangzhou.aliyuncs.com/share/aigc3d/data/LAM/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl
-python -m pip install /tmp/fbx-2020.3.4-cp310-cp310-manylinux1_x86_64.whl
-"""
-
-setup-blender = "bash scripts/setup-blender.sh"
-
-check-blender = "thirdparties/blender/blender-4.0.2-linux-x64/blender --version"
-
-webgl-install = "npm --prefix webgl_frontend install"
-webgl-dev = "npm --prefix webgl_frontend run dev --host 127.0.0.1 --port 5173"
-webgl-build = "npm --prefix webgl_frontend run build"
+test-webcam = "PYTHONPATH=. python -m lam.live.camera"
+test-mediapipe = "PYTHONPATH=. python -m lam.live.trackers.mediapipe_face_tracker"
+test-live-motion = "PYTHONPATH=. python -m lam.live.live_motion"
+test-flame-adapter = "PYTHONPATH=. python -m lam.live.retargeting.mediapipe_to_flame"

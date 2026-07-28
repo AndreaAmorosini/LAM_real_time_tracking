@@ -160,15 +160,45 @@ class LandmarkDerivedBlendshapes:
         left_mid_metric = (left_eye_y - left_brow_mid_y) / left_eye_w
         right_mid_metric = (right_eye_y - right_brow_mid_y) / right_eye_w
 
-        out["browOuterUpLeft"] = self._calibrated_delta(
-            "browOuterUpLeft_lm", left_outer_metric, True, gain=2.5
+        def shape_brow_up(v):
+            # Rimuove micro-drift idle.
+            deadzone = 0.045
+        
+            if v < deadzone:
+                return 0.0
+        
+            # Rimappa da deadzone..1 a 0..1.
+            v = (v - deadzone) / (1.0 - deadzone)
+        
+            # Curva leggermente espansiva.
+            # 1.15 mantiene responsive, ma non esplode come lineare + gain alto.
+            return max(0.0, min(1.0, v ** 1.15))
+        
+        
+        brow_outer_l = self._calibrated_delta(
+            "browOuterUpLeft_lm",
+            left_outer_metric,
+            True,
+            gain=1.95,
         )
-        out["browOuterUpRight"] = self._calibrated_delta(
-            "browOuterUpRight_lm", right_outer_metric, True, gain=2.5
+        
+        brow_outer_r = self._calibrated_delta(
+            "browOuterUpRight_lm",
+            right_outer_metric,
+            True,
+            gain=1.95,
         )
-        out["browInnerUp"] = self._calibrated_delta(
-            "browInnerUp_lm", inner_metric, True, gain=2.8
+        
+        brow_inner = self._calibrated_delta(
+            "browInnerUp_lm",
+            inner_metric,
+            True,
+            gain=2.05,
         )
+        
+        out["browOuterUpLeft"] = shape_brow_up(brow_outer_l)
+        out["browOuterUpRight"] = shape_brow_up(brow_outer_r)
+        out["browInnerUp"] = shape_brow_up(brow_inner)
 
         out["browDownLeft"] = self._calibrated_delta(
             "browDownLeft_lm", left_mid_metric, False, gain=2.2
@@ -267,6 +297,23 @@ class LandmarkDerivedBlendshapes:
 
         mouth_w = self._dist3(lms, 61, 291)
         mouth_open = self._dist3(lms, 13, 14) / max(mouth_w, 1e-6)
+
+        pitch = 0.0
+        head_down_amount = 0.0
+
+        if getattr(tracking, "facial_matrix", None) is not None:
+            try:
+                import math
+                M = tracking.facial_matrix
+                pitch = math.atan2(
+                    -M[1][2],
+                    math.sqrt(M[1][0] ** 2 + M[1][1] ** 2)
+                )
+
+                centered_pitch = pitch - 0.09
+                head_down_amount = max(0.0, centered_pitch)
+            except Exception:
+                head_down_amount = 0.0
         
         # Speech-specific signal: sensitive to small lip openings,
         # but shaped by a soft-knee curve so it does not explode.
@@ -278,6 +325,23 @@ class LandmarkDerivedBlendshapes:
         )
         
         speech_open = self._speech_curve(speech_raw)
+        raw_jaw = 0.0
+        try:
+            raw_jaw = float(tracking.blendshapes.get("jawOpen", 0.0))
+        except Exception:
+            raw_jaw = 0.0
+        
+        # Quando la testa è chinata, il landmark-derived mouth_open tende a collassare.
+        # Usiamo raw MediaPipe come assist, non come valore dominante.
+        if head_down_amount > 0.10:
+            head_down_t = max(0.0, min(1.0, (head_down_amount - 0.10) / 0.30))
+        
+            raw_assist = self._speech_curve(raw_jaw * (1.4 + head_down_t * 0.9))
+        
+            speech_open = max(
+                speech_open,
+                raw_assist * (0.45 + 0.35 * head_down_t),
+            )
         
         # Bigger jaw signal: slower and more conservative.
         big_jaw_raw = self._calibrated_delta(
@@ -298,6 +362,7 @@ class LandmarkDerivedBlendshapes:
         jaw = max(
             speech_open * 0.85,
             big_jaw,
+            raw_jaw * 0.35
         )
         
         out["speechOpen"] = max(0.0, min(1.0, speech_open))
@@ -351,15 +416,6 @@ class LandmarkDerivedBlendshapes:
             gain=4.0,
         )
 
-        # Pucker/funnel proxy: mouth width decreasing.
-        # pucker = self._calibrated_delta(
-        #     "mouthPucker_lm",
-        #     mouth_width_norm,
-        #     False,
-        #     gain=5.0,
-        # )
-        # out["mouthPucker"] = pucker
-        # out["mouthFunnel"] = pucker * 0.65
 
         # ------------------------------------------------------------------
         # O / U vowel proxy

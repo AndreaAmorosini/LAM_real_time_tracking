@@ -18,6 +18,9 @@ class HeadPoseReliability:
         self.prev_yaw = None
         self.prev_pitch = None
         self.prev_roll = None
+        self.frame_count = 0
+        self.neutral_frames = 20
+        self.neutral_pitch = 0.09
 
     def _angles_from_matrix(self, facial_matrix):
         if facial_matrix is None:
@@ -57,6 +60,34 @@ class HeadPoseReliability:
 
         yaw, pitch, roll = self._angles_from_matrix(tracking.facial_matrix)
 
+        self.frame_count += 1
+
+        if self.frame_count <= self.neutral_frames:
+            self.neutral_pitch = 0.90 * self.neutral_pitch + 0.10 * pitch
+
+        centered_pitch = pitch - self.neutral_pitch
+
+        # Brows are very sensitive to vertical head pitch.
+        # If the user raises/lowers the head, landmark brow metrics drift.
+        head_up_amount = max(0.0, -centered_pitch)
+        head_down_amount = max(0.0, centered_pitch)
+        
+        brow_pose = self._linear_falloff(
+            head_up_amount,
+            low=0.10,
+            high=0.34,
+            min_value=0.08,
+        )
+        
+        brow_yaw = self._linear_falloff(
+            abs(yaw),
+            low=0.20,
+            high=0.55,
+            min_value=0.45,
+        )
+        
+        brows = brow_pose * brow_yaw
+
         pose_amount = abs(yaw) + abs(pitch) * 0.8 + abs(roll) * 0.4
 
         if self.prev_yaw is None:
@@ -91,6 +122,22 @@ class HeadPoseReliability:
 
         jaw_eye = jaw_eye_pose * jaw_eye_motion
 
+        mouth_pose = self._linear_falloff(
+            abs(yaw) + abs(roll) * 0.35 + head_up_amount * 0.20,
+            low=0.25,
+            high=0.85,
+            min_value=0.65
+        )
+
+        mouth_motion = self._linear_falloff(
+            motion_amount,
+            low=0.08,
+            high=0.24,
+            min_value=0.65
+        )
+
+        mouth = mouth_pose * mouth_motion
+
         # Softer: brows / nose / cheeks
         derived_pose = self._linear_falloff(
             pose_amount,
@@ -113,4 +160,13 @@ class HeadPoseReliability:
             "derived": float(max(0.0, min(1.0, derived))),
             "pose_amount": float(pose_amount),
             "motion_amount": float(motion_amount),
+            "brows": float(max(0.0, min(1.0, brows))),
+            "mouth": float(max(0.0, min(1.0, mouth))),
+            "yaw": float(yaw),
+            "pitch": float(pitch),
+            "roll": float(roll),
+            "centered_pitch": float(centered_pitch),
+            "neutral_pitch": float(self.neutral_pitch),
+            "head_up": float(head_up_amount),
+            "head_down": float(head_down_amount)
         }

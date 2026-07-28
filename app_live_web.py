@@ -1,847 +1,43 @@
 import os
-import uuid
 import asyncio
 import base64
 import json
 import time
 from typing import Optional
-import contextlib
 import cv2
 import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from lam.live.settings import settings
 from lam.live.live_motion import LiveMotionProvider
 from lam.live.debug_draw import draw_face_landmarks, draw_blendshape_debug
 from lam.live.lam_live_renderer import LAMLiveRenderer
 from lam.live.retargeting.mediapipe_to_flame import MediaPipeToFlameAdapter
 from lam.live.retargeting.landmark_derived_blendshapes import LandmarkDerivedBlendshapes
+from lam.live.retargeting.webgl_blendshapes import build_webgl_payload
 from lam.live.retargeting.head_pose_reliability import HeadPoseReliability
 from lam.live.source_preprocessor import LAMSourcePreprocessor
 from lam.live.oac_exporter import (
     export_oac_zip_from_live_renderer,
-    safe_avatar_id,
     compute_image_signature,
     avatar_id_from_signature,
     oac_zip_path_for_avatar,
     is_valid_oac_zip,
 )
-from vhap.model import flame
 
 
 app = FastAPI()
-os.makedirs("output/open_avatar_chat", exist_ok=True)
-os.makedirs("webgl_frontend/dist", exist_ok=True)
-app.mount("/oac_assets", StaticFiles(directory="output/open_avatar_chat"), name="oac_assets")
-app.mount("/webgl", StaticFiles(directory="webgl_frontend/dist", html=True), name="webgl")
+os.makedirs(settings.oac_output_root, exist_ok=True)
+os.makedirs(settings.webgl_dist_dir, exist_ok=True)
+
+app.mount(
+    settings.oac_assets_route,
+    StaticFiles(directory=settings.oac_output_root),
+    name="oac_assets",
+)
 
-HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>LAM Live Tracking Debug</title>
-  <style>
-    body {
-      margin: 0;
-      background: #111;
-      color: #eee;
-      font-family: Arial, sans-serif;
-    }
-
-    header {
-      padding: 12px 18px;
-      background: #1d1d1d;
-      border-bottom: 1px solid #333;
-    }
-
-    main {
-      display: flex;
-      gap: 16px;
-      padding: 16px;
-    }
-
-    #feed {
-      width: auto;
-      max-width: 100%;
-      height: auto;
-      background: #000;
-      border: 1px solid #333;
-    }
-
-    aside {
-      width: 360px;
-      flex-shrink: 0;
-    }
-
-    button {
-      padding: 8px 12px;
-      margin-right: 8px;
-      background: #333;
-      color: white;
-      border: 1px solid #555;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background: #444;
-    }
-
-    pre {
-      background: #1b1b1b;
-      border: 1px solid #333;
-      padding: 12px;
-      white-space: pre-wrap;
-      min-height: 240px;
-      max-height: 75 vh;
-      overflow: auto;
-      font-family: monospace;
-      font-size: 13px;
-      line-height: 1.35;
-    }
-
-    .row {
-      margin-bottom: 12px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 4px;
-      color: #bbb;
-    }
-
-    input {
-      width: 100%;
-      padding: 6px;
-      background: #222;
-      color: #eee;
-      border: 1px solid #444;
-    }
-
-    select {
-      width: 100%;
-      padding: 6px;
-      background: #222;
-      color: #eee;
-      border: 1px solid #444;
-    }
-    
-  </style>
-</head>
-
-<body>
-  <header>
-    <h2>LAM Live MediaPipe Tracking Debug</h2>
-  </header>
-
-  <main>
-    <section>
-      <img id="feed" />
-    </section>
-
-    <aside>
-      <div class="row">
-        <button onclick="connect()">Start</button>
-        <button onclick="disconnect()">Stop</button>
-      </div>
-
-      <div class="row">
-        <label>UI FPS target</label>
-        <input id="ui_fps" type="number" value="20" min="1" max="60" />
-      </div>
-
-      <div class="row">
-        <label>JPEG quality</label>
-        <input id="jpeg_quality" type="number" value="85" min="20" max="100" />
-      </div>
-
-      <div class="row">
-        <label>Draw tessellation</label>
-        <input id="draw_tessellation" type="checkbox" />
-      </div>
-
-      <div class="row">
-        <label>Source input mode</label>
-        <select id="source_input_mode">
-          <option value="preprocessed">Preprocessed LAM image</option>
-          <option value="raw">Raw image</option>
-        </select>
-      </div>
-      
-      <div class="row">
-        <label>Source image path</label>
-        <input
-          id="source_image_path"
-          type="text"
-          value=""
-          placeholder="raw image or .../images/00000_00.png"
-        />
-      </div>
-
-      <div class="row">
-        <label>FLAME backend</label>
-        <select id="flame_backend">
-          <option value="standard">Standard FLAME 100D</option>
-          <option value="arkit">ARKit FLAME 52D</option>
-        </select>
-      </div>
-    
-      <div class="row">
-        <label>Output mode</label>
-        <select id="output_mode">
-          <option value="debug">MediaPipe Debug</option>
-          <option value="lam">LAM Render</option>
-          <option value="webgl">WebGL Avatar</option>
-        </select>
-      </div>
-
-      <pre id="status">Disconnected</pre>
-    </aside>
-  </main>
-
-  <script>
-    let ws = null;
-    let stopRequested = false;
-
-    function buildWsUrl() {
-      const uiFps = document.getElementById("ui_fps").value || "20";
-      const jpegQuality = document.getElementById("jpeg_quality").value || "80";
-      const drawTessellation = document.getElementById("draw_tessellation").checked ? "1" : "0";
-
-      const sourceInputMode = encodeURIComponent(document.getElementById("source_input_mode").value || "preprocessed");
-      const sourceImagePath = encodeURIComponent(document.getElementById("source_image_path").value || "");
-      const outputMode = encodeURIComponent(document.getElementById("output_mode").value || "debug");
-      const flameBackend = encodeURIComponent(document.getElementById("flame_backend").value || "standard");
-      const protocol = location.protocol === "https:" ? "wss" : "ws";
-
-      
-      return `${protocol}://${location.host}/ws/live` +
-        `?ui_fps=${uiFps}` +
-        `&jpeg_quality=${jpegQuality}` +
-        `&draw_tessellation=${drawTessellation}` +
-        `&source_input_mode=${sourceInputMode}` +
-        `&source_image_path=${sourceImagePath}` +
-        `&flame_backend=${flameBackend}` +
-        `&output_mode=${outputMode}`;
-    }
-
-    function connect() {
-      stopRequested = false;
-      if (ws !== null) {
-        ws.close();
-        ws = null;
-      }
-
-      const url = buildWsUrl();
-      ws = new WebSocket(url);
-
-      ws.onopen = () => {
-        document.getElementById("status").textContent = "Connected";
-      };
-
-      ws.onmessage = (event) => {
-        if (stopRequested) {
-            return;
-        }
-        const data = JSON.parse(event.data);
-
-        if (data.image) {
-          document.getElementById("feed").src = "data:image/jpeg;base64," + data.image;
-        }
-
-        if (data.status) {
-          document.getElementById("status").textContent = data.status;
-        }
-      };
-
-      ws.onerror = (event) => {
-        console.error("WebSocket error", event);
-        document.getElementById("status").textContent += "\\nWebSocket error";
-      };
-
-      ws.onclose = (event) => {
-        console.warn("WebSocket closed", event);
-        document.getElementById("status").textContent +=
-          `\\nDisconnected code=${event.code} reason=${event.reason}`;
-        ws = null;
-      };
-    }
-
-    function disconnect() {
-      stopRequested = true;
-    
-      document.getElementById("status").textContent += "\\nStopping...";
-    
-      if (ws !== null) {
-        try {
-          ws.send(JSON.stringify({ type: "stop" }));
-        } catch (err) {
-          console.warn("Could not send stop message", err);
-        }
-    
-        try {
-          ws.close(1000, "user stop");
-        } catch (err) {
-          console.warn("Could not close websocket", err);
-        }
-    
-        ws = null;
-      }
-    }
-  </script>
-</body>
-</html>
-"""
-
-ARKIT_BLENDSHAPE_NAMES = [
-    "browDownLeft",
-    "browDownRight",
-    "browInnerUp",
-    "browOuterUpLeft",
-    "browOuterUpRight",
-    "cheekPuff",
-    "cheekSquintLeft",
-    "cheekSquintRight",
-    "eyeBlinkLeft",
-    "eyeBlinkRight",
-    "eyeLookDownLeft",
-    "eyeLookDownRight",
-    "eyeLookInLeft",
-    "eyeLookInRight",
-    "eyeLookOutLeft",
-    "eyeLookOutRight",
-    "eyeLookUpLeft",
-    "eyeLookUpRight",
-    "eyeSquintLeft",
-    "eyeSquintRight",
-    "eyeWideLeft",
-    "eyeWideRight",
-    "jawForward",
-    "jawLeft",
-    "jawOpen",
-    "jawRight",
-    "mouthClose",
-    "mouthDimpleLeft",
-    "mouthDimpleRight",
-    "mouthFrownLeft",
-    "mouthFrownRight",
-    "mouthFunnel",
-    "mouthLeft",
-    "mouthLowerDownLeft",
-    "mouthLowerDownRight",
-    "mouthPressLeft",
-    "mouthPressRight",
-    "mouthPucker",
-    "mouthRight",
-    "mouthRollLower",
-    "mouthRollUpper",
-    "mouthShrugLower",
-    "mouthShrugUpper",
-    "mouthSmileLeft",
-    "mouthSmileRight",
-    "mouthStretchLeft",
-    "mouthStretchRight",
-    "mouthUpperUpLeft",
-    "mouthUpperUpRight",
-    "noseSneerLeft",
-    "noseSneerRight",
-    "tongueOut",
-]
-
-LANDMARK_DERIVED_OVERRIDE_NAMES = {
-    "browOuterUpLeft",
-    "browOuterUpRight",
-    "browInnerUp",
-    "browDownLeft",
-    "browDownRight",
-    "noseSneerLeft",
-    "noseSneerRight",
-    "cheekSquintLeft",
-    "cheekSquintRight",
-    "cheekPuff",
-    #Questi tre opzionali per maggiore espressività, ma non sempre affidabili.
-    "eyeWideLeft",
-    "eyeWideRight",
-    "jawOpen",
-    #Per il parlato
-    "mouthLowerDownLeft",
-    "mouthLowerDownRight",
-    "mouthPucker",
-    "mouthFunnel",
-    "mouthStretchLeft",
-    "mouthStretchRight",
-}
-
-SPEECH_DERIVED_OVERRIDE_NAMES = {
-    "mouthLowerDownLeft",
-    "mouthLowerDownRight",
-    "mouthPucker",
-    "mouthFunnel",
-    "mouthStretchLeft",
-    "mouthStretchRight",
-}
-
-
-
-WEBGL_ALL_VALID_BLENDSHAPES = {
-    "browDownLeft", "browDownRight",
-    "browInnerUp",
-    "browOuterUpLeft", "browOuterUpRight",
-
-    "cheekPuff",
-    "cheekSquintLeft", "cheekSquintRight",
-
-    "eyeBlinkLeft", "eyeBlinkRight",
-    "eyeLookDownLeft", "eyeLookDownRight",
-    "eyeLookInLeft", "eyeLookInRight",
-    "eyeLookOutLeft", "eyeLookOutRight",
-    "eyeLookUpLeft", "eyeLookUpRight",
-    "eyeSquintLeft", "eyeSquintRight",
-    "eyeWideLeft", "eyeWideRight",
-
-    "jawForward",
-    "jawLeft", "jawRight",
-    "jawOpen",
-
-    "mouthClose",
-    "mouthDimpleLeft", "mouthDimpleRight",
-    "mouthFrownLeft", "mouthFrownRight",
-    "mouthFunnel",
-    "mouthLeft", "mouthRight",
-    "mouthLowerDownLeft", "mouthLowerDownRight",
-    "mouthPressLeft", "mouthPressRight",
-    "mouthPucker",
-    "mouthRollLower", "mouthRollUpper",
-    "mouthShrugLower", "mouthShrugUpper",
-    "mouthSmileLeft", "mouthSmileRight",
-    "mouthStretchLeft", "mouthStretchRight",
-    "mouthUpperUpLeft", "mouthUpperUpRight",
-
-    "noseSneerLeft", "noseSneerRight",
-}
-
-
-def _clamp01(v):
-    return float(max(0.0, min(1.0, float(v))))
-
-
-def _apply_keep(b, keep):
-    for k in list(b.keys()):
-        if k not in keep:
-            b[k] = 0.0
-    return b
-
-
-def _apply_deadzones(b, deadzones):
-    for k, dz in deadzones.items():
-        if abs(b.get(k, 0.0)) < dz:
-            b[k] = 0.0
-    return b
-
-
-def _apply_gains(b, gains):
-    for k, g in gains.items():
-        b[k] = b.get(k, 0.0) * g
-    return b
-
-
-def _clamp_all(b):
-    for k in list(b.keys()):
-        b[k] = _clamp01(b[k])
-    return b
-
-
-def _apply_common_conflicts(b):
-    jaw = b.get("jawOpen", 0.0)
-    
-    if jaw > 0.06:
-        # Gradually reduce mouthClose during speech instead of hard switching late.
-        reduction = max(0.0, min(1.0, (jaw - 0.06) / 0.12))
-        b["mouthClose"] *= 1.0 - reduction
-
-    # pucker/funnel compete but do not fully cancel.
-    # if b.get("mouthPucker", 0.0) > b.get("mouthFunnel", 0.0):
-    #     b["mouthFunnel"] *= 0.45
-    # else:
-    #     b["mouthPucker"] *= 0.45
-
-    pucker = b.get("mouthPucker", 0.0)
-    funnel = b.get("mouthFunnel", 0.0)
-    
-    # Allow O/U to combine pucker and funnel.
-    # Only reduce the weaker one when one shape clearly dominates.
-    if pucker > funnel * 1.35:
-        b["mouthFunnel"] *= 0.75
-    elif funnel > pucker * 1.35:
-        b["mouthPucker"] *= 0.75
-
-    rounding = max(
-        b.get("mouthPucker", 0.0),
-        b.get("mouthFunnel", 0.0),
-    )
-    
-    if rounding > 0.06:
-        reduction = max(0.0, min(1.0, rounding / 0.35))
-        b["mouthClose"] *= 1.0 - reduction * 0.75
-
-    # MediaPipe cheekPuff compatibility alias.
-    b["mouthCheekPuff"] = max(
-        b.get("mouthCheekPuff", 0.0),
-        b.get("cheekPuff", 0.0),
-    )
-
-    # Optional visible sneer workaround.
-    nose_l = b.get("noseSneerLeft", 0.0)
-    nose_r = b.get("noseSneerRight", 0.0)
-
-    b["cheekSquintLeft"] = max(b.get("cheekSquintLeft", 0.0), nose_l * 0.8)
-    b["cheekSquintRight"] = max(b.get("cheekSquintRight", 0.0), nose_r * 0.8)
-
-    return b
-
-def postprocess_webgl_blendshapes_raw_debug(b):
-    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
-
-    # Very light deadzone only.
-    deadzones = {k: 0.01 for k in WEBGL_ALL_VALID_BLENDSHAPES}
-    _apply_deadzones(b, deadzones)
-
-    # No gains.
-    _apply_common_conflicts(b)
-    _clamp_all(b)
-    return b
-
-def postprocess_webgl_blendshapes_stable_live(b):
-    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
-
-    deadzones = {
-        # Brows
-        "browDownLeft": 0.035,
-        "browDownRight": 0.035,
-        "browInnerUp": 0.005,
-        "browOuterUpLeft": 0.005,
-        "browOuterUpRight": 0.005,
-
-        # Cheeks / nose
-        "cheekPuff": 0.05,
-        "cheekSquintLeft": 0.035,
-        "cheekSquintRight": 0.035,
-        "noseSneerLeft": 0.005,
-        "noseSneerRight": 0.005,
-
-        # Eyes
-        "eyeBlinkLeft": 0.025,
-        "eyeBlinkRight": 0.025,
-        "eyeLookDownLeft": 0.05,
-        "eyeLookDownRight": 0.05,
-        "eyeLookInLeft": 0.05,
-        "eyeLookInRight": 0.05,
-        "eyeLookOutLeft": 0.05,
-        "eyeLookOutRight": 0.05,
-        "eyeLookUpLeft": 0.05,
-        "eyeLookUpRight": 0.05,
-        "eyeSquintLeft": 0.035,
-        "eyeSquintRight": 0.035,
-        "eyeWideLeft": 0.015,
-        "eyeWideRight": 0.015,
-
-        # Jaw
-        "jawForward": 0.06,
-        "jawLeft": 0.05,
-        "jawRight": 0.05,
-        "jawOpen": 0.04,
-
-        # Mouth
-        "mouthClose": 0.05,
-        "mouthDimpleLeft": 0.035,
-        "mouthDimpleRight": 0.035,
-        "mouthFrownLeft": 0.04,
-        "mouthFrownRight": 0.04,
-        "mouthFunnel": 0.035,
-        "mouthLeft": 0.05,
-        "mouthRight": 0.05,
-        "mouthLowerDownLeft": 0.025,
-        "mouthLowerDownRight": 0.025,
-        "mouthPressLeft": 0.05,
-        "mouthPressRight": 0.05,
-        "mouthPucker": 0.035,
-        "mouthRollLower": 0.05,
-        "mouthRollUpper": 0.05,
-        "mouthShrugLower": 0.05,
-        "mouthShrugUpper": 0.05,
-        "mouthSmileLeft": 0.025,
-        "mouthSmileRight": 0.025,
-        "mouthStretchLeft": 0.025,
-        "mouthStretchRight": 0.025,
-        "mouthUpperUpLeft": 0.04,
-        "mouthUpperUpRight": 0.04,
-    }
-
-    gains = {
-        # Brows
-        "browDownLeft": 2.2,
-        "browDownRight": 2.2,
-        "browInnerUp": 3.0,
-        "browOuterUpLeft": 3.0,
-        "browOuterUpRight": 3.0,
-
-        # Cheeks / nose
-        "cheekPuff": 0.7,
-        "cheekSquintLeft": 2.0,
-        "cheekSquintRight": 2.0,
-        "noseSneerLeft": 3.0,
-        "noseSneerRight": 3.0,
-
-        # Eyes
-        "eyeBlinkLeft": 1.1,
-        "eyeBlinkRight": 1.1,
-        "eyeLookDownLeft": 0.35,
-        "eyeLookDownRight": 0.35,
-        "eyeLookInLeft": 0.35,
-        "eyeLookInRight": 0.35,
-        "eyeLookOutLeft": 0.35,
-        "eyeLookOutRight": 0.35,
-        "eyeLookUpLeft": 0.35,
-        "eyeLookUpRight": 0.35,
-        "eyeSquintLeft": 0.8,
-        "eyeSquintRight": 0.8,
-        "eyeWideLeft": 2.0,
-        "eyeWideRight": 2.0,
-
-        # Jaw
-        "jawForward": 0.30,
-        "jawLeft": 0.45,
-        "jawRight": 0.45,
-        "jawOpen": 0.70,
-
-        # Mouth
-        "mouthClose": 0.40,
-        "mouthDimpleLeft": 1.0,
-        "mouthDimpleRight": 1.0,
-        "mouthFrownLeft": 0.9,
-        "mouthFrownRight": 0.9,
-        "mouthFunnel": 1.00,
-        "mouthLeft": 0.65,
-        "mouthRight": 0.65,
-        "mouthLowerDownLeft": 0.85,
-        "mouthLowerDownRight": 0.85,
-        "mouthPressLeft": 0.55,
-        "mouthPressRight": 0.55,
-        "mouthPucker": 1.00,
-        "mouthRollLower": 0.45,
-        "mouthRollUpper": 0.45,
-        "mouthShrugLower": 0.55,
-        "mouthShrugUpper": 0.55,
-        "mouthSmileLeft": 1.20,
-        "mouthSmileRight": 1.20,
-        "mouthStretchLeft": 1.05,
-        "mouthStretchRight": 1.05,
-        "mouthUpperUpLeft": 0.70,
-        "mouthUpperUpRight": 0.70,
-    }
-
-    _apply_deadzones(b, deadzones)
-    _apply_gains(b, gains)
-
-    jaw = b.get("jawOpen", 0.0)
-    
-    if jaw < 0.04:
-        b["jawOpen"] = 0.0
-    
-    b["jawOpen"] = min(b.get("jawOpen", 0.0), 0.62)
-
-    # Derived/proxy nose and cheek expressions.
-    # MediaPipe often keeps noseSneer/cheekSquint/cheekPuff at 0.
-    # We synthesize them from more reliable nearby facial signals.
-    upper_l = b.get("mouthUpperUpLeft", 0.0)
-    upper_r = b.get("mouthUpperUpRight", 0.0)
-
-    smile_l = b.get("mouthSmileLeft", 0.0)
-    smile_r = b.get("mouthSmileRight", 0.0)
-
-    squint_l = b.get("eyeSquintLeft", 0.0)
-    squint_r = b.get("eyeSquintRight", 0.0)
-
-    pucker = b.get("mouthPucker", 0.0)
-    funnel = b.get("mouthFunnel", 0.0)
-
-    # Nose sneer proxy: upper lip raise is the closest reliable signal.
-    b["noseSneerLeft"] = max(
-        b.get("noseSneerLeft", 0.0),
-        upper_l * 1.30,
-    )
-    b["noseSneerRight"] = max(
-        b.get("noseSneerRight", 0.0),
-        upper_r * 1.30,
-    )
-
-    # Cheek/zygoma proxy: smile corners + eye squint.
-    b["cheekSquintLeft"] = max(
-        b.get("cheekSquintLeft", 0.0),
-        smile_l * 0.45,
-        squint_l * 0.70,
-    )
-    b["cheekSquintRight"] = max(
-        b.get("cheekSquintRight", 0.0),
-        smile_r * 0.45,
-        squint_r * 0.70,
-    )
-
-    # Cheek puff is hard to estimate from webcam.
-    # Pucker/funnel gives a subtle approximation.
-    b["cheekPuff"] = max(
-        b.get("cheekPuff", 0.0),
-        min(0.35, max(pucker, funnel) * 0.35),
-    )
-
-    b["mouthCheekPuff"] = max(
-        b.get("mouthCheekPuff", 0.0),
-        b.get("cheekPuff", 0.0),
-    )
-    
-    _apply_common_conflicts(b)
-    _clamp_all(b)
-    return b
-
-def postprocess_webgl_blendshapes_expressive_live(b):
-    _apply_keep(b, WEBGL_ALL_VALID_BLENDSHAPES)
-
-    deadzones = {
-        # Lower thresholds for responsiveness.
-        "browDownLeft": 0.006,
-        "browDownRight": 0.006,
-        "browInnerUp": 0.004,
-        "browOuterUpLeft": 0.004,
-        "browOuterUpRight": 0.004,
-
-        "cheekPuff": 0.035,
-        "cheekSquintLeft": 0.006,
-        "cheekSquintRight": 0.006,
-        "noseSneerLeft": 0.004,
-        "noseSneerRight": 0.004,
-
-        "eyeBlinkLeft": 0.018,
-        "eyeBlinkRight": 0.018,
-        "eyeLookDownLeft": 0.04,
-        "eyeLookDownRight": 0.04,
-        "eyeLookInLeft": 0.04,
-        "eyeLookInRight": 0.04,
-        "eyeLookOutLeft": 0.04,
-        "eyeLookOutRight": 0.04,
-        "eyeLookUpLeft": 0.04,
-        "eyeLookUpRight": 0.04,
-        "eyeSquintLeft": 0.025,
-        "eyeSquintRight": 0.025,
-        "eyeWideLeft": 0.03,
-        "eyeWideRight": 0.03,
-
-        "jawForward": 0.05,
-        "jawLeft": 0.04,
-        "jawRight": 0.04,
-        "jawOpen": 0.008,
-
-        "mouthClose": 0.04,
-        "mouthDimpleLeft": 0.025,
-        "mouthDimpleRight": 0.025,
-        "mouthFrownLeft": 0.03,
-        "mouthFrownRight": 0.03,
-        "mouthFunnel": 0.04,
-        "mouthLeft": 0.04,
-        "mouthRight": 0.04,
-        "mouthLowerDownLeft": 0.03,
-        "mouthLowerDownRight": 0.03,
-        "mouthPressLeft": 0.04,
-        "mouthPressRight": 0.04,
-        "mouthPucker": 0.04,
-        "mouthRollLower": 0.04,
-        "mouthRollUpper": 0.04,
-        "mouthShrugLower": 0.04,
-        "mouthShrugUpper": 0.04,
-        "mouthSmileLeft": 0.006,
-        "mouthSmileRight": 0.006,
-        "mouthStretchLeft": 0.006,
-        "mouthStretchRight": 0.006,
-        "mouthUpperUpLeft": 0.03,
-        "mouthUpperUpRight": 0.03,
-    }
-
-    gains = {
-        # Brows
-        "browDownLeft": 1.5,
-        "browDownRight": 1.5,
-        "browInnerUp": 2.1,
-        "browOuterUpLeft": 2.0,
-        "browOuterUpRight": 2.0,
-
-        # Cheeks / nose
-        "cheekPuff": 0.9,
-        "cheekSquintLeft": 1.5,
-        "cheekSquintRight": 1.5,
-        "noseSneerLeft": 2.0,
-        "noseSneerRight": 2.0,
-
-        # Eyes
-        "eyeBlinkLeft": 1.3,
-        "eyeBlinkRight": 1.3,
-        "eyeLookDownLeft": 0.50,
-        "eyeLookDownRight": 0.50,
-        "eyeLookInLeft": 0.50,
-        "eyeLookInRight": 0.50,
-        "eyeLookOutLeft": 0.50,
-        "eyeLookOutRight": 0.50,
-        "eyeLookUpLeft": 0.50,
-        "eyeLookUpRight": 0.50,
-        "eyeSquintLeft": 1.05,
-        "eyeSquintRight": 1.05,
-        "eyeWideLeft": 1.0,
-        "eyeWideRight": 1.0,
-
-        # Jaw
-        "jawForward": 0.45,
-        "jawLeft": 0.65,
-        "jawRight": 0.65,
-        "jawOpen": 0.85,
-
-        # Mouth
-        "mouthClose": 0.50,
-        "mouthDimpleLeft": 1.35,
-        "mouthDimpleRight": 1.35,
-        "mouthFrownLeft": 1.20,
-        "mouthFrownRight": 1.20,
-        "mouthFunnel": 0.90,
-        "mouthLeft": 0.85,
-        "mouthRight": 0.85,
-        "mouthLowerDownLeft": 0.95,
-        "mouthLowerDownRight": 0.95,
-        "mouthPressLeft": 0.75,
-        "mouthPressRight": 0.75,
-        "mouthPucker": 0.90,
-        "mouthRollLower": 0.65,
-        "mouthRollUpper": 0.65,
-        "mouthShrugLower": 0.75,
-        "mouthShrugUpper": 0.75,
-        "mouthSmileLeft": 1.55,
-        "mouthSmileRight": 1.55,
-        "mouthStretchLeft": 1.35,
-        "mouthStretchRight": 1.35,
-        "mouthUpperUpLeft": 0.95,
-        "mouthUpperUpRight": 0.95,
-    }
-
-    _apply_deadzones(b, deadzones)
-    _apply_gains(b, gains)
-    _apply_common_conflicts(b)
-    _clamp_all(b)
-    return b
-
-def postprocess_webgl_blendshapes(b, mode="stable"):
-    if mode == "raw":
-        return postprocess_webgl_blendshapes_raw_debug(b)
-    if mode == "expressive":
-        return postprocess_webgl_blendshapes_expressive_live(b)
-    return postprocess_webgl_blendshapes_stable_live(b)
 
 def head_motion_factor(tracking):
     if tracking is None or tracking.facial_matrix is None:
@@ -877,167 +73,6 @@ def head_motion_factor(tracking):
 
     t = (amount - low) / (high - low)
     return 1.0 * (1.0 - t) + 0.25 * t
-
-
-def build_webgl_payload(
-    tracking,
-    status: str, 
-    fps_capture: float, 
-    fps_sent: float, 
-    mapping_mode: str = "stable", 
-    landmark_derived=None,
-    head_reliability=None
-):
-    blendshapes = {name: 0.0 for name in ARKIT_BLENDSHAPE_NAMES}
-    if tracking is not None and tracking.detected:
-        for name, value in tracking.blendshapes.items():
-            if name in blendshapes:
-                blendshapes[name] = float(value)
-
-    derived_blendshapes = {}
-    reliability = {
-        "jaw_eye": 1.0,
-        "derived": head_motion_factor(tracking),
-        "pose_amount": 0.0,
-        "motion_amount": 0.0,
-    }
-
-    if head_reliability is not None:
-        reliability = head_reliability.update(tracking)
-
-    if landmark_derived is not None:
-        derived_blendshapes = landmark_derived.derive(tracking)
-    
-        jaw_eye_factor = float(reliability.get("jaw_eye", 1.0))
-        derived_factor = float(reliability.get("derived", 1.0))
-    
-        for name, value in derived_blendshapes.items():
-            if name not in blendshapes:
-                continue
-    
-            if name not in LANDMARK_DERIVED_OVERRIDE_NAMES:
-                continue
-    
-            raw_value = float(blendshapes.get(name, 0.0))
-            derived_value = float(value)
-    
-            if name == "jawOpen":
-                factor = jaw_eye_factor
-            
-                if factor <= 0.05:
-                    jaw = raw_value
-                else:
-                    derived_shaped = max(0.0, min(1.0, derived_value)) ** 1.35
-                    derived_weight = 0.40 * factor
-            
-                    jaw = raw_value * (1.0 - derived_weight) + derived_shaped * derived_weight
-            
-                    # Preserve raw MediaPipe. Derived should help, not dominate.
-                    jaw = max(raw_value * 0.95, jaw)
-            
-                if jaw < 0.04:
-                    jaw = 0.0
-            
-                jaw = min(jaw, 0.62)
-            
-                blendshapes["jawOpen"] = jaw
-                continue
-    
-            if name in {"eyeWideLeft", "eyeWideRight"}:
-                factor = jaw_eye_factor
-    
-                if factor <= 0.05:
-                    wide = raw_value
-                else:
-                    wide = raw_value * (1.0 - factor) + derived_value * factor
-    
-                if wide < 0.08:
-                    wide = 0.0
-    
-                wide = min(wide, 0.85)
-    
-                blendshapes[name] = wide
-                continue
-
-            if name in SPEECH_DERIVED_OVERRIDE_NAMES:
-                mouth_factor = max(
-                    0.0,
-                    min(1.0, 0.65 * jaw_eye_factor + 0.35 * derived_factor),
-                )
-            
-                derived_mouth = derived_value * mouth_factor
-            
-                if name in {"mouthLowerDownLeft", "mouthLowerDownRight"}:
-                    value_out = max(
-                        raw_value,
-                        raw_value * 0.55 + derived_mouth * 0.45,
-                        derived_mouth * 0.70,
-                    )
-                    blendshapes[name] = min(value_out, 0.45)
-                    continue
-            
-                if name == "mouthPucker":
-                    value_out = max(
-                        raw_value,
-                        raw_value * 0.45 + derived_mouth * 0.55,
-                        derived_mouth * 0.90,
-                    )
-                    blendshapes[name] = min(value_out, 0.75)
-                    continue
-                
-                if name == "mouthFunnel":
-                    value_out = max(
-                        raw_value,
-                        raw_value * 0.45 + derived_mouth * 0.55,
-                        derived_mouth * 0.90,
-                    )
-                    blendshapes[name] = min(value_out, 0.70)
-                    continue
-            
-                if name in {"mouthStretchLeft", "mouthStretchRight"}:
-                    value_out = max(
-                        raw_value,
-                        derived_mouth * 0.75,
-                    )
-                    blendshapes[name] = min(value_out, 0.55)
-                    continue
-
-    
-            # All other landmark-derived params also get gated.
-            # Brows/nose/cheeks use a softer factor than jaw/eyes.
-            derived_value *= derived_factor
-    
-            # If factor is very low, use MediaPipe raw only.
-            if derived_factor <= 0.05:
-                blendshapes[name] = raw_value
-            else:
-                blendshapes[name] = max(raw_value, derived_value)
-
-    blendshapes["mouthCheekPuff"] = blendshapes.get("cheekPuff", 0.0)
-    blendshapes = postprocess_webgl_blendshapes(blendshapes, mode=mapping_mode)
-
-    facial_matrix = None
-    if tracking is not None and tracking.facial_matrix is not None:
-        facial_matrix = tracking.facial_matrix.tolist()
-
-    return {
-        "type": "webgl_frame",
-        "detected": bool(tracking is not None and tracking.detected),
-        "blendshapes": blendshapes,
-        "facial_matrix": facial_matrix,
-        "fps_capture": fps_capture,
-        "fps_sent": fps_sent,
-        "mapping_mode": mapping_mode,
-        "status": status,
-        "derived_blendshapes": derived_blendshapes,
-        "derived_factor": head_motion_factor(tracking),
-        "reliability": reliability
-    }
-
-@app.get("/")
-def index():
-    return HTMLResponse(HTML)
-
 
 def _fmt_float(v, width=7, precision=3):
     try:
@@ -1177,14 +212,14 @@ async def export_oac_from_image(
     image: UploadFile = File(...),
     blender_path: Optional[str] = Form(None),
 ):
-    upload_dir = "output/live_uploads"
-    oac_output_root = "output/open_avatar_chat"
+    upload_dir = settings.upload_dir
+    oac_output_root = settings.oac_output_root
     
     os.makedirs(upload_dir, exist_ok=True)
     os.makedirs(oac_output_root, exist_ok=True)
     
     if not blender_path or blender_path.strip() in ["", "/path/to/blender"]:
-        blender_path = os.environ.get("LAM_BLENDER_PATH", "blender")
+        blender_path = settings.blender_path
     
     ext = os.path.splitext(image.filename or "")[1].lower()
     if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -1204,8 +239,8 @@ async def export_oac_from_image(
             "signature": signature,
             "cached": True,
             "zip_path": zip_path,
-            "asset_url": f"/oac_assets/{zip_name}",
-            "webgl_url": f"/webgl/?asset=/oac_assets/{zip_name}",
+            "asset_url": f"{settings.oac_assets_route}/{zip_name}",
+            "webgl_url": f"/?asset={settings.oac_assets_route}/{zip_name}",
         }
     
     raw_image_path = os.path.join(upload_dir, avatar_id + ext)
@@ -1214,7 +249,7 @@ async def export_oac_from_image(
         f.write(image_bytes)
 
     preprocessor = LAMSourcePreprocessor(
-        output_dir="tracking_output_live",
+        output_dir=settings.tracking_output_dir,
         detect_iris_landmarks=True,
     )
 
@@ -1224,10 +259,10 @@ async def export_oac_from_image(
     )
 
     lam_renderer = LAMLiveRenderer(
-        config_path="configs/inference/lam-20k-8gpu.yaml",
-        model_name="./model_zoo/lam_models/releases/lam/lam-20k/step_045500/",
-        device="cuda",
-        render_size=512,
+        config_path=settings.lam_config_path,
+        model_name=settings.lam_model_name,
+        device=settings.lam_device,
+        render_size=settings.lam_render_size,
     )
 
     await asyncio.to_thread(lam_renderer.load_model)
@@ -1262,9 +297,23 @@ async def export_oac_from_image(
         "signature": signature,
         "cached": False,
         "zip_path": zip_path,
-        "asset_url": f"/oac_assets/{zip_name}",
-        "webgl_url": f"/webgl/?asset=/oac_assets/{zip_name}",
+        "asset_url": f"{settings.oac_assets_route}/{zip_name}",
+        "webgl_url": f"/?asset={settings.oac_assets_route}/{zip_name}",
     }
+
+@app.get("/api/client-config")
+async def client_config():
+    return {
+        "webglWsFps": settings.webgl_ui_fps,
+        "mappingMode": settings.mapping_mode,
+        "statusIntervalMs": 250,
+        "sortEveryNFrames": 2,
+        "jawGain": 1.0,
+        "revealInMs": 3200,
+        "revealOutMs": 2600,
+        "revealFadeDistance": 1.35,
+    }
+
 
 
 @app.websocket("/ws/live")
@@ -1272,16 +321,18 @@ async def live_ws(websocket: WebSocket):
     await websocket.accept()
 
     query = websocket.query_params
-    ui_fps = float(query.get("ui_fps", 20))
-    jpeg_quality = int(query.get("jpeg_quality", 80))
+    ui_fps = float(query.get("ui_fps", settings.default_ui_fps))
+    jpeg_quality = int(query.get("jpeg_quality", settings.jpeg_quality))
     draw_tessellation = query.get("draw_tessellation", "0") == "1"
+    debug_landmarks = query.get("debug_landmarks", "0") == "1"
+    debug_flame = query.get("debug_flame", "0") == "1"
 
     source_input_mode = query.get("source_input_mode", "preprocessed")
     if source_input_mode not in ["preprocessed", "raw"]:
         source_input_mode = "preprocessed"
     source_image_path = query.get("source_image_path", "")
     output_mode = query.get("output_mode", "debug")
-    mapping_mode = query.get("mapping_mode", "stable")
+    mapping_mode = query.get("mapping_mode", settings.mapping_mode)
     if mapping_mode not in ["stable", "expressive", "raw"]:
         mapping_mode = "stable"
     flame_backend = query.get("flame_backend", "standard")
@@ -1289,10 +340,10 @@ async def live_ws(websocket: WebSocket):
         flame_backend = "standard"
 
     if flame_backend == "arkit":
-        lam_config_path = "configs/inference/live-arkit.yaml"
+        lam_config_path = settings.lam_arkit_config_path
         expr_dim = 52
     else:
-        lam_config_path = "configs/inference/lam-20k-8gpu.yaml"
+        lam_config_path = settings.lam_config_path
         expr_dim = 100
 
     if output_mode not in ["debug", "lam", "webgl"]:            
@@ -1320,9 +371,9 @@ async def live_ws(websocket: WebSocket):
     try:
         provider = LiveMotionProvider(
             device="cpu",
-            width=320,
-            height=240,
-            fps=30,
+            width=settings.capture_width,
+            height=settings.capture_height,
+            fps=settings.capture_fps,
             expr_dim=expr_dim,
             # smoothing_alpha=0.20
         )
@@ -1364,7 +415,7 @@ async def live_ws(websocket: WebSocket):
                 await asyncio.to_thread(lam_renderer.prepare_source_image, processed_source_image_path)
 
                 await send_status(websocket, "LAM init: Preparing default camera...")
-                await asyncio.to_thread(lam_renderer.prepare_camer_from_motion_dir, "assets/sample_motion/export/Look_In_My_Eyes/")
+                await asyncio.to_thread(lam_renderer.prepare_camer_from_motion_dir, settings.camera_motion_dir)
         
                 source_betas = lam_renderer.get_source_betas_cpu()
                 
@@ -1397,7 +448,7 @@ async def live_ws(websocket: WebSocket):
                 )
                 return 
 
-        landmark_derived = LandmarkDerivedBlendshapes(neutral_frames=20, alpha=0.60)
+        landmark_derived = LandmarkDerivedBlendshapes(neutral_frames=settings.derived_neutral_frames, alpha=settings.derived_alpha)
         
         while True:
 
@@ -1413,6 +464,15 @@ async def live_ws(websocket: WebSocket):
                     if new_mode in ["raw", "stable", "expressive"]:
                         mapping_mode = new_mode
                         print("[STREAM] mapping_mode changed to:", mapping_mode)
+
+                if control.get("type") == "set_debug_options":
+                    debug_landmarks = bool(control.get("debug_landmarks", debug_landmarks))
+                    debug_flame = bool(control.get("debug_flame", debug_flame))
+                    print(
+                        "[STREAM] debug options:",
+                        "debug_landmarks=", debug_landmarks,
+                        "debug_flame=", debug_flame,
+                    )
                 
             loop_t0 = time.time()
             render_dt = 0.0
@@ -1442,14 +502,14 @@ async def live_ws(websocket: WebSocket):
 
             if output_mode == "webgl":
                 status = build_status(
-                    ok=ok,
-                    fps_capture=fps_capture,
-                    fps_sent=fps_sent,
-                    flame_params=flame_params,
-                    tracking=tracking,
-                    output_mode=output_mode
-                )
-
+                        ok=ok,
+                        fps_capture=fps_capture,
+                        fps_sent=fps_sent,
+                        flame_params=flame_params,
+                        tracking=tracking,
+                        output_mode=output_mode
+                    )
+                
                 payload = build_webgl_payload(
                     tracking=tracking,
                     status=status,
@@ -1459,6 +519,37 @@ async def live_ws(websocket: WebSocket):
                     landmark_derived=landmark_derived,
                     head_reliability=head_reliability
                 )
+            
+                if debug_flame:
+                    payload["flame_debug"] = status
+            
+                if debug_landmarks:
+                    debug_frame = draw_face_landmarks(
+                        frame,
+                        tracking,
+                        draw_tesselation=True,
+                        draw_contours=True,
+                        draw_irises=True,
+                    )
+            
+                    debug_frame = draw_blendshape_debug(
+                        debug_frame,
+                        tracking,
+                        max_items=10,
+                    )
+            
+                    debug_bgr = cv2.cvtColor(debug_frame, cv2.COLOR_RGB2BGR)
+            
+                    success, jpg = await asyncio.to_thread(
+                        cv2.imencode,
+                        ".jpg",
+                        debug_bgr,
+                        [cv2.IMWRITE_JPEG_QUALITY, 70],
+                    )
+            
+                    if success:
+                        payload["debug_image"] = base64.b64encode(jpg).decode("ascii")
+    
 
                 send_ok = await safe_send_json(websocket, payload)
                 if not send_ok:
@@ -1599,6 +690,12 @@ async def live_ws(websocket: WebSocket):
 
         if lam_renderer is not None:
             pass
+
+app.mount(
+    "/",
+    StaticFiles(directory=settings.webgl_dist_dir, html=True),
+    name="webgl_root"
+)
 
 
 if __name__ == "__main__":

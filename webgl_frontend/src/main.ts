@@ -1,4 +1,5 @@
 import * as GaussianSplats3D from "gaussian-splat-renderer-for-lam";
+import { WEBGL_CONFIG } from "./config";
 
 type BlendshapeMap = Record<string, number>;
 
@@ -19,6 +20,20 @@ type WebglFrameMessage = {
   fps_capture?: number;
   fps_sent?: number;
   status?: string;
+
+  debug_image?: string | null;
+  flame_debug?: string | null;
+};
+
+type RuntimeConfig = {
+  webglWsFps: number;
+  mappingMode: string;
+  statusIntervalMs: number;
+  sortEveryNFrames: number;
+  jawGain: number;
+  revealInMs: number;
+  revealOutMs: number;
+  revealFadeDistance: number;
 };
 
 
@@ -94,7 +109,7 @@ function normalizeBlendshapes(input: BlendshapeMap | undefined | null): Blendsha
   const out = makeNeutralBlendshapes();
 
   const RESPONSIVE_GAIN: Record<string, number> = {
-    jawOpen: 1.00,
+    jawOpen: WEBGL_CONFIG.jawGain,
     mouthSmileLeft: 1.20,
     mouthSmileRight: 1.20,
     eyeBlinkLeft: 1.35,
@@ -136,8 +151,17 @@ const createBtn = getRequiredElement<HTMLButtonElement>("createBtn");
 const stopBtn = getRequiredElement<HTMLButtonElement>("stopBtn");
 const blenderPathInput = document.getElementById("blenderPathInput") as HTMLInputElement | null;
 const mappingModeSelect = getRequiredElement<HTMLSelectElement>("mappingModeSelect");
+const showLandmarkDebugInput = getRequiredElement<HTMLInputElement>("showLandmarkDebugInput");
+const showFlameDebugInput = getRequiredElement<HTMLInputElement>("showFlameDebugInput");
+
+const landmarkDebugPanel = getRequiredElement<HTMLDivElement>("landmarkDebugPanel");
+const landmarkDebugImage = getRequiredElement<HTMLImageElement>("landmarkDebugImage");
+
+const flameDebugPanel = getRequiredElement<HTMLDivElement>("flameDebugPanel");
+const flameDebugText = getRequiredElement<HTMLPreElement>("flameDebugText");
+
 let lastStatusUiUpdate = 0;
-const STATUS_UI_INTERVAL_MS = 250;
+const STATUS_UI_INTERVAL_MS = WEBGL_CONFIG.statusIntervalMs;
 
 mappingModeSelect.onchange = () => {
   const mode = mappingModeSelect.value || "stable";
@@ -177,6 +201,17 @@ let patchedMixer = false;
 let latestDetected = false;
 let renderer: any = null;
 let ws: WebSocket | null = null;
+
+let runtimeConfig: RuntimeConfig = {
+  webglWsFps: WEBGL_CONFIG.wsFps,
+  mappingMode: "stable",
+  statusIntervalMs: WEBGL_CONFIG.statusIntervalMs,
+  sortEveryNFrames: WEBGL_CONFIG.sortEveryNFrames,
+  jawGain: WEBGL_CONFIG.jawGain,
+  revealInMs: WEBGL_CONFIG.revealInMs,
+  revealOutMs: WEBGL_CONFIG.revealOutMs,
+  revealFadeDistance: WEBGL_CONFIG.revealFadeDistance,
+};
 
 let availableBones: any[] = [];
 
@@ -218,6 +253,46 @@ function refreshDebugBoneUi() {
   // console.log("=== DEBUG BONE UI BONES ===");
   // console.log(availableBones.map((b: any) => b.name).join("\n"));
 }
+
+async function loadRuntimeConfig() {
+  try {
+    const response = await fetch("/api/client-config");
+    if (!response.ok) return;
+
+    const config = await response.json();
+    runtimeConfig = {
+      ...runtimeConfig,
+      ...config,
+    };
+  } catch (err) {
+    console.warn("Could not load runtime config", err);
+  }
+}
+
+function sendDebugOptions() {
+  landmarkDebugPanel.style.display = showLandmarkDebugInput.checked ? "block" : "none";
+  flameDebugPanel.style.display = showFlameDebugInput.checked ? "block" : "none";
+
+  if (!showLandmarkDebugInput.checked) {
+    landmarkDebugImage.removeAttribute("src");
+  }
+
+  if (!showFlameDebugInput.checked) {
+    flameDebugText.textContent = "";
+  }
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "set_debug_options",
+      debug_landmarks: showLandmarkDebugInput.checked,
+      debug_flame: showFlameDebugInput.checked,
+    }));
+  }
+}
+
+showLandmarkDebugInput.onchange = sendDebugOptions;
+showFlameDebugInput.onchange = sendDebugOptions;
+
 
 function initDebugBoneUi() {
   const updateLabels = () => {
@@ -320,10 +395,16 @@ function appendStatus(text: string) {
 function buildWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const mappingMode = encodeURIComponent(mappingModeSelect.value || "stable");
+  
+  const debugLandmarks = showLandmarkDebugInput.checked ? "1" : "0";
+  const debugFlame = showFlameDebugInput.checked ? "1" : "0";
+  
   return `${protocol}://${window.location.host}/ws/live` +
     `?output_mode=webgl` +
-    `&ui_fps=30` +
-    `&mapping_mode=${mappingMode}`;
+    `&ui_fps=${runtimeConfig.webglWsFps}` +
+    `&mapping_mode=${mappingMode}` +
+    `&debug_landmarks=${debugLandmarks}` +
+    `&debug_flame=${debugFlame}`;
 }
 
 async function exportAvatarFromPhoto(file: File): Promise<ExportResponse> {
@@ -415,8 +496,7 @@ function setSplatRevealAmount(amount01: number) {
   const maxRadius = getSplatMaxRadius(mesh);
 
   // Deve combaciare con il valore nello shader:
-  // float fadeDistance = 0.75;
-  const fadeDistance = 1.35;
+  const fadeDistance = WEBGL_CONFIG.revealFadeDistance;
 
   // amount=0 => tutto invisibile
   // amount=1 => tutto visibile
@@ -540,7 +620,7 @@ async function initRenderer(assetPath: string) {
   await waitForSplatMeshReady();
   
   setSplatRevealAmount(0.0);
-  await animateSplatReveal("in", 3200);
+  await animateSplatReveal("in", WEBGL_CONFIG.revealInMs);
   
   appendStatus("Avatar reveal completed");
 
@@ -709,6 +789,16 @@ function connectWebSocket() {
     );
     const derived = msg.derived_blendshapes || {};
     const rel = msg.reliability || {};
+    if (showLandmarkDebugInput.checked && msg.debug_image) {
+      landmarkDebugPanel.style.display = "block";
+      landmarkDebugImage.src = `data:image/jpeg;base64,${msg.debug_image}`;
+    }
+    
+    if (showFlameDebugInput.checked) {
+      flameDebugPanel.style.display = "block";
+      flameDebugText.textContent = String(msg.flame_debug || msg.status || "");
+    }
+    
     latestHeadMatrix = msg.facial_matrix ?? null;
     applyHeadPose(latestHeadMatrix);
     applyDebugBoneRotation();
@@ -756,6 +846,20 @@ function connectWebSocket() {
       `derived       : ${(rel.derived ?? 1).toFixed(3)}`,
       `pose_amount   : ${(rel.pose_amount ?? 0).toFixed(3)}`,
       `motion_amount : ${(rel.motion_amount ?? 0).toFixed(3)}`,
+      `yaw           : ${(rel.yaw ?? 0).toFixed(3)}`,
+      `pitch         : ${(rel.pitch ?? 0).toFixed(3)}`,
+      `roll          : ${(rel.roll ?? 0).toFixed(3)}`,
+      `neutral_pitch : ${(rel.neutral_pitch ?? 0).toFixed(3)}`,
+      `centered_pitch: ${(rel.centered_pitch ?? 0).toFixed(3)}`,
+      `head_up       : ${(rel.head_up ?? 0).toFixed(3)}`,
+      `head_down     : ${(rel.head_down ?? 0).toFixed(3)}`,
+      `mouth         : ${(rel.mouth ?? 1).toFixed(3)}`,
+      `brows         : ${(rel.brows ?? 1).toFixed(3)}`,
+      `raw jaw?      : ${(msg.raw_blendshapes?.jawOpen ?? 0).toFixed(3)}`,
+      `drv jaw       : ${(derived.jawOpen ?? 0).toFixed(3)}`,
+      `out jaw       : ${(latestBlendshapes.jawOpen ?? 0).toFixed(3)}`,
+      `head_down     : ${(rel.head_down ?? 0).toFixed(3)}`,
+      `mouth         : ${(rel.mouth ?? 1).toFixed(3)}`,
     ];
 
     const now = performance.now();
@@ -838,7 +942,7 @@ async function stopTrackingAndUnloadAvatar() {
     appendStatus("Animating avatar unload...");
 
     try {
-      await animateSplatRevealOut(2600);
+      await animateSplatRevealOut(WEBGL_CONFIG.revealOutMs);
     } catch (err) {
       console.warn("Avatar unload animation failed", err);
     }
@@ -906,6 +1010,7 @@ createBtn.onclick = async () => {
   }
 };
 
+await loadRuntimeConfig();
 initDebugBlendshapeUi();
 initDebugBoneUi();
 

@@ -81,10 +81,70 @@
       border-top: 1px solid #333;
       margin: 14px 0;
     }
+
+    .debug-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    
+    .debug-toggle-row input {
+      width: auto;
+      margin: 0;
+    }
+    
+    #landmarkDebugPanel {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      width: 360px;
+      background: rgba(10, 10, 10, 0.92);
+      border: 1px solid #444;
+      padding: 8px;
+      z-index: 20;
+      display: none;
+    }
+    
+    #landmarkDebugPanel img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #000;
+    }
+    
+    #flameDebugPanel {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      width: 430px;
+      max-height: 70vh;
+      overflow: auto;
+      background: rgba(10, 10, 10, 0.92);
+      border: 1px solid #444;
+      padding: 8px;
+      z-index: 20;
+      display: none;
+    }
+    
+    #flameDebugPanel pre {
+      margin: 0;
+      max-height: none;
+    }
+    
   </style>
 </head>
 <body>
   <div id="avatar"></div>
+  <div id="landmarkDebugPanel">
+    <strong>MediaPipe Landmarks</strong>
+    <img id="landmarkDebugImage" />
+  </div>
+  
+  <div id="flameDebugPanel">
+    <strong>FLAME / Blendshape Debug</strong>
+    <pre id="flameDebugText"></pre>
+  </div>
 
   <aside id="side">
     <h3>LAM WebGL Live</h3>
@@ -104,6 +164,18 @@
     <button id="stopBtn">Stop Tracking + Unload Avatar</button>
 
     <hr />
+
+    <h4>Debug Views</h4>
+    
+    <label class="debug-toggle-row">
+      <input id="showLandmarkDebugInput" type="checkbox" />
+      Show MediaPipe landmarks
+    </label>
+    
+    <label class="debug-toggle-row">
+      <input id="showFlameDebugInput" type="checkbox" />
+      Show FLAME / blendshape debug
+    </label>
     
     <h4>Debug Blendshape</h4>
     
