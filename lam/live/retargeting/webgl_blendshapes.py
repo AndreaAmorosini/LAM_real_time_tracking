@@ -70,6 +70,34 @@ SPEECH_DERIVED_OVERRIDE_NAMES = {
     "mouthStretchRight",
 }
 
+MOUTH_DETAIL_DERIVED_NAMES = {
+    "mouthUpperUpLeft",
+    "mouthUpperUpRight",
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthClose",
+    "mouthPressLeft",
+    "mouthPressRight",
+    "mouthRollUpper",
+    "mouthRollLower",
+    "mouthShrugUpper",
+    "mouthShrugLower",
+    "mouthStretchLeft",
+    "mouthStretchRight",
+    "mouthFrownLeft",
+    "mouthFrownRight",
+    "mouthDimpleLeft",
+    "mouthDimpleRight",
+}
+
+MOUTH_ASYMMETRY_DERIVED_NAMES = {
+    "mouthLeft",
+    "mouthRight",
+    "jawLeft",
+    "jawRight",
+}
+
+
 
 LANDMARK_DERIVED_OVERRIDE_NAMES = {
     "browOuterUpLeft",
@@ -90,10 +118,122 @@ LANDMARK_DERIVED_OVERRIDE_NAMES = {
     "jawOpen",
 
     *SPEECH_DERIVED_OVERRIDE_NAMES,
+    *MOUTH_DETAIL_DERIVED_NAMES,
+    *MOUTH_ASYMMETRY_DERIVED_NAMES,
 }
 
 
 WEBGL_ALL_VALID_BLENDSHAPES = set(ARKIT_BLENDSHAPE_NAMES)
+
+EYE_POSE_SENSITIVE_NAMES = {
+    "eyeLookDownLeft",
+    "eyeLookDownRight",
+    "eyeLookInLeft",
+    "eyeLookInRight",
+    "eyeLookOutLeft",
+    "eyeLookOutRight",
+    "eyeLookUpLeft",
+    "eyeLookUpRight",
+    "eyeSquintLeft",
+    "eyeSquintRight",
+    "eyeWideLeft",
+    "eyeWideRight",
+}
+
+EYE_BLINK_NAMES = {
+    "eyeBlinkLeft",
+    "eyeBlinkRight",
+}
+
+BROW_POSE_SENSITIVE_NAMES = {
+    "browInnerUp",
+    "browOuterUpLeft",
+    "browOuterUpRight",
+    "browDownLeft",
+    "browDownRight",
+}
+
+NOSE_CHEEK_POSE_SENSITIVE_NAMES = {
+    "noseSneerLeft",
+    "noseSneerRight",
+    "cheekPuff",
+    "cheekSquintLeft",
+    "cheekSquintRight",
+}
+
+MOUTH_POSE_SENSITIVE_NAMES = {
+    "jawOpen",
+    "jawLeft",
+    "jawRight",
+    "jawForward",
+    "mouthClose",
+    "mouthDimpleLeft",
+    "mouthDimpleRight",
+    "mouthFrownLeft",
+    "mouthFrownRight",
+    "mouthFunnel",
+    "mouthLeft",
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthPressLeft",
+    "mouthPressRight",
+    "mouthPucker",
+    "mouthRight",
+    "mouthRollLower",
+    "mouthRollUpper",
+    "mouthShrugLower",
+    "mouthShrugUpper",
+    "mouthSmileLeft",
+    "mouthSmileRight",
+    "mouthStretchLeft",
+    "mouthStretchRight",
+    "mouthUpperUpLeft",
+    "mouthUpperUpRight",
+}
+
+
+def _apply_pose_gates_to_raw_blendshapes(blendshapes, reliability):
+    """
+    MediaPipe raw blendshapes drift heavily during head movement.
+    Apply reliability gates before merging raw + landmark-derived values.
+    """
+
+    eye_gate = float(reliability.get("eyes", reliability.get("jaw_eye", 1.0)))
+    blink_gate = 0.35 + 0.65 * eye_gate
+
+    brow_gate = float(reliability.get("brows", reliability.get("derived", 1.0)))
+    nose_cheek_gate = float(reliability.get("nose_cheek", reliability.get("derived", 1.0)))
+    mouth_gate = float(reliability.get("mouth", reliability.get("derived", 1.0)))
+
+    raw_gate = float(reliability.get("raw", 1.0))
+
+    for name in EYE_POSE_SENSITIVE_NAMES:
+        blendshapes[name] = blendshapes.get(name, 0.0) * eye_gate
+
+    for name in EYE_BLINK_NAMES:
+        blendshapes[name] = blendshapes.get(name, 0.0) * blink_gate
+
+    for name in BROW_POSE_SENSITIVE_NAMES:
+        blendshapes[name] = blendshapes.get(name, 0.0) * brow_gate
+
+    for name in NOSE_CHEEK_POSE_SENSITIVE_NAMES:
+        blendshapes[name] = blendshapes.get(name, 0.0) * nose_cheek_gate
+
+    for name in MOUTH_POSE_SENSITIVE_NAMES:
+        blendshapes[name] = blendshapes.get(name, 0.0) * mouth_gate
+
+    # Global safety net for unknown raw names.
+    for name in list(blendshapes.keys()):
+        if (
+            name not in EYE_POSE_SENSITIVE_NAMES
+            and name not in EYE_BLINK_NAMES
+            and name not in BROW_POSE_SENSITIVE_NAMES
+            and name not in NOSE_CHEEK_POSE_SENSITIVE_NAMES
+            and name not in MOUTH_POSE_SENSITIVE_NAMES
+        ):
+            blendshapes[name] = blendshapes.get(name, 0.0) * raw_gate
+
+    return blendshapes
 
 
 def _clamp01(v):
@@ -219,33 +359,33 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "eyeWideRight": 0.015,
 
         "jawForward": 0.06,
-        "jawLeft": 0.05,
-        "jawRight": 0.05,
+        "jawLeft": 0.035,
+        "jawRight": 0.035,
         "jawOpen": JAW_TUNING.stable_deadzone,
 
-        "mouthClose": 0.05,
-        "mouthDimpleLeft": 0.035,
-        "mouthDimpleRight": 0.035,
-        "mouthFrownLeft": 0.04,
-        "mouthFrownRight": 0.04,
+        "mouthClose": 0.035,
+        "mouthDimpleLeft": 0.025,
+        "mouthDimpleRight": 0.025,
+        "mouthFrownLeft": 0.030,
+        "mouthFrownRight": 0.030,
         "mouthFunnel": mouth.funnel_deadzone,
         "mouthLeft": 0.05,
         "mouthRight": 0.05,
-        "mouthLowerDownLeft": mouth.lower_down_deadzone,
-        "mouthLowerDownRight": mouth.lower_down_deadzone,
-        "mouthPressLeft": 0.05,
-        "mouthPressRight": 0.05,
+        "mouthLowerDownLeft": 0.040,
+        "mouthLowerDownRight": 0.040,
+        "mouthPressLeft": 0.030,
+        "mouthPressRight": 0.030,
         "mouthPucker": mouth.pucker_deadzone,
-        "mouthRollLower": 0.05,
-        "mouthRollUpper": 0.05,
-        "mouthShrugLower": 0.05,
-        "mouthShrugUpper": 0.05,
+        "mouthRollLower": 0.050,
+        "mouthRollUpper": 0.050,
+        "mouthShrugLower": 0.050,
+        "mouthShrugUpper": 0.050,
         "mouthSmileLeft": 0.025,
         "mouthSmileRight": 0.025,
         "mouthStretchLeft": mouth.stretch_deadzone,
         "mouthStretchRight": mouth.stretch_deadzone,
-        "mouthUpperUpLeft": 0.04,
-        "mouthUpperUpRight": 0.04,
+        "mouthUpperUpLeft": 0.055,
+        "mouthUpperUpRight": 0.055,
     }
 
     gains = {
@@ -258,8 +398,8 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "cheekPuff": 0.7,
         "cheekSquintLeft": 2.0,
         "cheekSquintRight": 2.0,
-        "noseSneerLeft": 3.0,
-        "noseSneerRight": 3.0,
+        "noseSneerLeft": 3.25,
+        "noseSneerRight": 3.25,
 
         "eyeBlinkLeft": 1.1,
         "eyeBlinkRight": 1.1,
@@ -277,22 +417,22 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "eyeWideRight": 2.0,
 
         "jawForward": 0.30,
-        "jawLeft": 0.45,
-        "jawRight": 0.45,
+        "jawLeft": 0.55,
+        "jawRight": 0.55,
         "jawOpen": JAW_TUNING.stable_gain,
 
-        "mouthClose": 0.40,
-        "mouthDimpleLeft": 1.0,
-        "mouthDimpleRight": 1.0,
-        "mouthFrownLeft": 0.9,
-        "mouthFrownRight": 0.9,
+        "mouthClose": 0.55,
+        "mouthDimpleLeft": 1.15,
+        "mouthDimpleRight": 1.15,
+        "mouthFrownLeft": 1.15,
+        "mouthFrownRight": 1.15,
         "mouthFunnel": mouth.funnel_gain,
         "mouthLeft": 0.65,
         "mouthRight": 0.65,
-        "mouthLowerDownLeft": mouth.lower_down_gain,
-        "mouthLowerDownRight": mouth.lower_down_gain,
-        "mouthPressLeft": 0.55,
-        "mouthPressRight": 0.55,
+        "mouthLowerDownLeft": 0.70,
+        "mouthLowerDownRight": 0.70,
+        "mouthPressLeft": 0.85,
+        "mouthPressRight": 0.85,
         "mouthPucker": mouth.pucker_gain,
         "mouthRollLower": 0.45,
         "mouthRollUpper": 0.45,
@@ -302,8 +442,8 @@ def postprocess_webgl_blendshapes_stable_live(b):
         "mouthSmileRight": 1.20,
         "mouthStretchLeft": mouth.stretch_gain,
         "mouthStretchRight": mouth.stretch_gain,
-        "mouthUpperUpLeft": 0.70,
-        "mouthUpperUpRight": 0.70,
+        "mouthUpperUpLeft": 0.55,
+        "mouthUpperUpRight": 0.55,
     }
 
     _apply_deadzones(b, deadzones)
@@ -321,8 +461,6 @@ def postprocess_webgl_blendshapes_stable_live(b):
 
 
 def postprocess_webgl_blendshapes_expressive_live(b):
-    # Per ora mantieni expressive come stable + valori meno repressivi,
-    # oppure sposta qui la funzione expressive attuale invariata.
     return postprocess_webgl_blendshapes_stable_live(b)
 
 
@@ -361,6 +499,7 @@ def build_webgl_payload(
 
     if head_reliability is not None:
         reliability = head_reliability.update(tracking)
+        blendshapes = _apply_pose_gates_to_raw_blendshapes(blendshapes, reliability)
 
     derived_blendshapes = {}
 
@@ -385,8 +524,12 @@ def build_webgl_payload(
                 head_down = float(reliability.get("head_down", 0.0))
                 head_down_boost = 1.0
 
-                if head_down > 0.12:
-                    head_down_boost = 1.0 + min(0.75, (head_down - 0.12) / 0.28 * 0.75)
+                mouth_activity_raw = max(raw_value, derived_value)
+                
+                if head_down > 0.12 and mouth_activity_raw > 0.035:
+                    head_down_boost = 1.0 + min(0.55, (head_down - 0.12) / 0.28 * 0.55)
+                else:
+                    head_down_boost = 1.0
 
                 if factor <= 0.05:
                     jaw = raw_value
@@ -406,6 +549,15 @@ def build_webgl_payload(
                 continue
 
             if name in {"eyeWideLeft", "eyeWideRight"}:
+                centered_pitch = abs(float(reliability.get("centered_pitch", 0.0)))
+                
+                pose_gate = 1.0
+                if centered_pitch > 0.12:
+                    pose_gate = max(0.25, 1.0 - (centered_pitch - 0.12) / 0.35)
+                
+                derived_value *= pose_gate
+                raw_value *= 0.65 + 0.35 * pose_gate
+                
                 factor = jaw_eye_factor
 
                 if factor <= 0.05:
@@ -491,12 +643,19 @@ def build_webgl_payload(
                     )
                 )
 
-                derived_mouth = derived_value * mouth_factor
-
+                mouth_activity = float(derived_blendshapes.get("mouthActivity", 0.0))
+                activity_gate = max(0.0, min(1.0, (mouth_activity - 0.045) / 0.16))
+                
+                derived_mouth = derived_value * mouth_factor * activity_gate
+                
                 head_down = float(reliability.get("head_down", 0.0))
-                if head_down > 0.12:
-                    speech_boost = 1.0 + min(0.60, (head_down - 0.12) / 0.28 * 0.60)
+                if head_down > 0.12 and mouth_activity > 0.075:
+                    speech_boost = 1.0 + min(0.35, (head_down - 0.12) / 0.28 * 0.35)
                     derived_mouth *= speech_boost
+                
+                if activity_gate <= 0.04:
+                    blendshapes[name] = raw_value * 0.20
+                    continue
 
                 if name in {"mouthLowerDownLeft", "mouthLowerDownRight"}:
                     value_out = max(
@@ -529,6 +688,93 @@ def build_webgl_payload(
                     value_out = max(raw_value, derived_mouth * 0.75)
                     blendshapes[name] = min(value_out, 0.55)
                     continue
+
+            if name in MOUTH_DETAIL_DERIVED_NAMES:
+                mouth_factor = float(reliability.get("mouth", derived_factor))
+                derived_mouth = derived_value * mouth_factor
+                mouth_activity = float(derived_blendshapes.get("mouthActivity", 0.0))
+                activity_gate = max(0.0, min(1.0, (mouth_activity - 0.035) / 0.14))
+
+                OPENING_DETAIL_NAMES = {
+                    "mouthUpperUpLeft",
+                    "mouthUpperUpRight",
+                    "mouthLowerDownLeft",
+                    "mouthLowerDownRight",
+                    "mouthShrugUpper",
+                    "mouthShrugLower",
+                    "mouthRollUpper",
+                    "mouthRollLower",
+                    "mouthDimpleLeft",
+                    "mouthDimpleRight",
+                    "mouthFrownLeft",
+                    "mouthFrownRight",
+                }
+
+                if name in OPENING_DETAIL_NAMES and activity_gate <= 0.05:
+                    blendshapes[name] = raw_value * 0.35
+                    continue
+                
+                derived_mouth *= activity_gate if name in OPENING_DETAIL_NAMES else 1.0
+            
+                # Conservative blend: raw MediaPipe remains valid, derived adds expressivity.
+                if name in {
+                    "mouthClose",
+                    "mouthPressLeft",
+                    "mouthPressRight",
+                    "mouthRollUpper",
+                    "mouthRollLower",
+                }:
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.55 + derived_mouth * 0.45,
+                        derived_mouth * 0.65,
+                    )
+                    blendshapes[name] = min(value_out, 0.65)
+                    continue
+            
+                if name in {
+                    "mouthShrugUpper",
+                    "mouthShrugLower",
+                    "mouthUpperUpLeft",
+                    "mouthUpperUpRight",
+                    "mouthLowerDownLeft",
+                    "mouthLowerDownRight",
+                }:
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.45 + derived_mouth * 0.55,
+                        derived_mouth * 0.75,
+                    )
+                    blendshapes[name] = min(value_out, 0.60)
+                    continue
+            
+                if name in {
+                    "mouthDimpleLeft",
+                    "mouthDimpleRight",
+                    "mouthFrownLeft",
+                    "mouthFrownRight",
+                }:
+                    value_out = max(
+                        raw_value,
+                        raw_value * 0.50 + derived_mouth * 0.50,
+                        derived_mouth * 0.70,
+                    )
+                    blendshapes[name] = min(value_out, 0.55)
+                    continue
+            
+            if name in MOUTH_ASYMMETRY_DERIVED_NAMES:
+                mouth_factor = float(reliability.get("mouth", derived_factor))
+                derived_mouth = derived_value * mouth_factor
+            
+                value_out = max(
+                    raw_value,
+                    raw_value * 0.65 + derived_mouth * 0.35,
+                    derived_mouth * 0.50,
+                )
+            
+                blendshapes[name] = min(value_out, 0.45)
+                continue
+
 
             derived_value *= derived_factor
 

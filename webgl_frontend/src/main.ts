@@ -6,7 +6,10 @@ type BlendshapeMap = Record<string, number>;
 type ExportResponse = {
   avatar_id: string;
   signature?: string;
-  cached?: string;
+  cached?: boolean;
+  refined?: boolean;
+  cleanup_on_stop?: boolean;
+  cleanup_id?: string | null;
   zip_path: string;
   asset_url: string;
   webgl_url: string;
@@ -160,6 +163,15 @@ const landmarkDebugImage = getRequiredElement<HTMLImageElement>("landmarkDebugIm
 const flameDebugPanel = getRequiredElement<HTMLDivElement>("flameDebugPanel");
 const flameDebugText = getRequiredElement<HTMLPreElement>("flameDebugText");
 
+const multiViewEnableInput = document.getElementById("multiViewEnableInput") as HTMLInputElement | null;
+const frontPhotoInput = document.getElementById("frontPhotoInput") as HTMLInputElement | null;
+const rightPhotoInput = document.getElementById("rightPhotoInput") as HTMLInputElement | null;
+const leftPhotoInput = document.getElementById("leftPhotoInput") as HTMLInputElement | null;
+const upPhotoInput = document.getElementById("upPhotoInput") as HTMLInputElement | null;
+const downPhotoInput = document.getElementById("downPhotoInput") as HTMLInputElement | null;
+const refineItersInput = document.getElementById("refineItersInput") as HTMLInputElement | null;
+
+
 let lastStatusUiUpdate = 0;
 const STATUS_UI_INTERVAL_MS = WEBGL_CONFIG.statusIntervalMs;
 
@@ -201,6 +213,8 @@ let patchedMixer = false;
 let latestDetected = false;
 let renderer: any = null;
 let ws: WebSocket | null = null;
+let currentCleanupId: string | null = null;
+let currentCleanupOnStop: boolean = false;
 
 let runtimeConfig: RuntimeConfig = {
   webglWsFps: WEBGL_CONFIG.wsFps,
@@ -841,6 +855,14 @@ function connectWebSocket() {
       `drv speechOpen : ${(derived.speechOpen ?? 0).toFixed(3)}`,
       `lowerDownL     : ${(latestBlendshapes.mouthLowerDownLeft ?? 0).toFixed(3)}`,
       `lowerDownR     : ${(latestBlendshapes.mouthLowerDownRight ?? 0).toFixed(3)}`,
+      `drv nostrilL   : ${(derived.nostrilFlareLeft ?? 0).toFixed(3)}`,
+      `drv nostrilR   : ${(derived.nostrilFlareRight ?? 0).toFixed(3)}`,
+      `drv noseLower  : ${(derived.noseLower ?? 0).toFixed(3)}`,
+      `raw noseSneerL : ${(derived.noseSneerLeftRaw ?? 0).toFixed(4)}`,
+      `raw noseSneerR : ${(derived.noseSneerRightRaw ?? 0).toFixed(4)}`,
+      `raw nostrilL   : ${(derived.nostrilFlareLeftRaw ?? 0).toFixed(4)}`,
+      `raw nostrilR   : ${(derived.nostrilFlareRightRaw ?? 0).toFixed(4)}`,
+      `raw noseLower  : ${(derived.noseLowerRaw ?? 0).toFixed(4)}`,
       "=== RELIABILITY ===",
       `jaw_eye       : ${(rel.jaw_eye ?? 1).toFixed(3)}`,
       `derived       : ${(rel.derived ?? 1).toFixed(3)}`,
@@ -909,6 +931,39 @@ function animateSplatRevealOut(durationMs = 1300): Promise<void> {
   });
 }
 
+async function cleanupCurrentExport() {
+  if (!currentCleanupOnStop || !currentCleanupId) {
+    return;
+  }
+
+  const cleanupId = currentCleanupId;
+
+  currentCleanupId = null;
+  currentCleanupOnStop = false;
+
+  try {
+    appendStatus(`Cleaning temporary export: ${cleanupId}`);
+
+    const response = await fetch("/api/cleanup/export", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cleanup_id: cleanupId,
+      }),
+    });
+
+    const result = await response.json().catch(() => null);
+
+    appendStatus(`Cleanup completed: ${JSON.stringify(result)}`);
+  } catch (err) {
+    console.warn("Cleanup failed", err);
+    appendStatus(`Cleanup failed: ${String(err)}`);
+  }
+}
+
+
 let isStopping = false;
 
 async function stopTrackingAndUnloadAvatar() {
@@ -964,9 +1019,53 @@ async function stopTrackingAndUnloadAvatar() {
 
   avatarEl.innerHTML = "";
 
+  await cleanupCurrentExport();
+
   setStatus("Stopped. Avatar unloaded.");
 
   isStopping = false;
+}
+
+async function exportAvatarFromMultiviewPhotos(): Promise<ExportResponse> {
+  const form = new FormData();
+
+  const front = frontPhotoInput?.files?.[0] || photoInput.files?.[0];
+  if (!front) throw new Error("Front photo is required");
+
+  form.append("front", front);
+
+  const optional = [
+    ["right", rightPhotoInput?.files?.[0]],
+    ["left", leftPhotoInput?.files?.[0]],
+    ["up", upPhotoInput?.files?.[0]],
+    ["down", downPhotoInput?.files?.[0]],
+  ] as const;
+
+  for (const [name, file] of optional) {
+    if (file) form.append(name, file);
+  }
+
+  const refineIters = refineItersInput?.value || "700";
+  form.append("refine_iters", refineIters);
+
+  const blenderPath = blenderPathInput?.value?.trim() || "";
+  if (blenderPath.length > 0) {
+    form.append("blender_path", blenderPath);
+  }
+
+  setStatus("Uploading multi-view photos and refining Gaussian avatar...\nThis can take several minutes.");
+
+  const response = await fetch("/api/oac/export-multiview", {
+    method: "POST",
+    body: form,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Multi-view export failed: HTTP ${response.status}\n${text}`);
+  }
+
+  return (await response.json()) as ExportResponse;
 }
 
 
@@ -985,8 +1084,13 @@ createBtn.onclick = async () => {
 
     createBtn.disabled = true;
 
-    const result = await exportAvatarFromPhoto(file);
+    const result = multiViewEnableInput?.checked
+      ? await exportAvatarFromMultiviewPhotos()
+      : await exportAvatarFromPhoto(file);
 
+    currentCleanupOnStop = Boolean(result.cleanup_on_stop);
+    currentCleanupId = result.cleanup_id || null;
+    
     setStatus(
       [
         result.cached ? "Avatar loaded from cache." : "Avatar export completed.",
@@ -1017,4 +1121,19 @@ initDebugBoneUi();
 window.addEventListener("beforeunload", () => {
   if (ws) ws.close(1000, "page unload");
   if (renderer && typeof renderer.dispose === "function") renderer.dispose();
+
+  if (currentCleanupOnStop && currentCleanupId) {
+    const payload = JSON.stringify({
+      cleanup_id: currentCleanupId,
+    });
+
+    try {
+      navigator.sendBeacon(
+        "/api/cleanup/export",
+        new Blob([payload], { type: "application/json" }),
+      );
+    } catch {
+      // best effort only
+    }
+  }
 });

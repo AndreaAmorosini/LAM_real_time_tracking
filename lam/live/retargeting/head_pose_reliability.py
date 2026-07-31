@@ -54,42 +54,34 @@ class HeadPoseReliability:
             return {
                 "jaw_eye": 1.0,
                 "derived": 1.0,
+                "mouth": 1.0,
+                "brows": 1.0,
+                "eyes": 1.0,
+                "nose_cheek": 1.0,
+                "raw": 1.0,
                 "pose_amount": 0.0,
                 "motion_amount": 0.0,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "centered_pitch": 0.0,
+                "neutral_pitch": self.neutral_pitch,
+                "head_up": 0.0,
+                "head_down": 0.0,
             }
-
+    
         yaw, pitch, roll = self._angles_from_matrix(tracking.facial_matrix)
-
+    
         self.frame_count += 1
-
+    
         if self.frame_count <= self.neutral_frames:
             self.neutral_pitch = 0.90 * self.neutral_pitch + 0.10 * pitch
-
+    
         centered_pitch = pitch - self.neutral_pitch
-
-        # Brows are very sensitive to vertical head pitch.
-        # If the user raises/lowers the head, landmark brow metrics drift.
+    
         head_up_amount = max(0.0, -centered_pitch)
         head_down_amount = max(0.0, centered_pitch)
-        
-        brow_pose = self._linear_falloff(
-            head_up_amount,
-            low=0.10,
-            high=0.34,
-            min_value=0.08,
-        )
-        
-        brow_yaw = self._linear_falloff(
-            abs(yaw),
-            low=0.20,
-            high=0.55,
-            min_value=0.45,
-        )
-        
-        brows = brow_pose * brow_yaw
-
-        pose_amount = abs(yaw) + abs(pitch) * 0.8 + abs(roll) * 0.4
-
+    
         if self.prev_yaw is None:
             motion_amount = 0.0
         else:
@@ -98,75 +90,101 @@ class HeadPoseReliability:
                 + abs(pitch - self.prev_pitch)
                 + abs(roll - self.prev_roll) * 0.5
             )
-
+    
         self.prev_yaw = yaw
         self.prev_pitch = pitch
         self.prev_roll = roll
-
-        # Strict: jawOpen / eyeWide
-        # Full under ~7 deg-ish, off after ~22 deg-ish.
-        jaw_eye_pose = self._linear_falloff(
+    
+        # Static pose should use centered pitch, not absolute pitch.
+        pose_amount = (
+            abs(yaw) * 1.0
+            + abs(centered_pitch) * 1.15
+            + abs(roll) * 0.45
+        )
+    
+        # Dynamic head motion gates.
+        motion_strict = self._linear_falloff(
+            motion_amount,
+            low=0.015,
+            high=0.070,
+            min_value=0.03,
+        )
+    
+        motion_soft = self._linear_falloff(
+            motion_amount,
+            low=0.025,
+            high=0.120,
+            min_value=0.20,
+        )
+    
+        # Static pose gates.
+        pose_strict = self._linear_falloff(
             pose_amount,
-            low=0.12,
-            high=0.38,
-            min_value=0.0,
+            low=0.10,
+            high=0.36,
+            min_value=0.05,
         )
-
-        # Freeze/reduce when head moves quickly.
-        jaw_eye_motion = self._linear_falloff(
-            motion_amount,
-            low=0.035,
-            high=0.12,
-            min_value=0.0,
+    
+        pose_soft = self._linear_falloff(
+            pose_amount,
+            low=0.16,
+            high=0.62,
+            min_value=0.20,
         )
-
-        jaw_eye = jaw_eye_pose * jaw_eye_motion
-
-        mouth_pose = self._linear_falloff(
-            abs(yaw) + abs(roll) * 0.35 + head_up_amount * 0.20,
-            low=0.25,
-            high=0.85,
-            min_value=0.65
-        )
-
-        mouth_motion = self._linear_falloff(
-            motion_amount,
+    
+        # Region-specific gates.
+        jaw_eye = pose_strict * motion_strict
+    
+        eyes = self._linear_falloff(
+            abs(yaw) + abs(centered_pitch) * 1.4 + abs(roll) * 0.5,
             low=0.08,
-            high=0.24,
-            min_value=0.65
-        )
-
-        mouth = mouth_pose * mouth_motion
-
-        # Softer: brows / nose / cheeks
-        derived_pose = self._linear_falloff(
-            pose_amount,
-            low=0.18,
-            high=0.60,
-            min_value=0.25,
-        )
-
-        derived_motion = self._linear_falloff(
-            motion_amount,
-            low=0.06,
-            high=0.18,
-            min_value=0.35,
-        )
-
-        derived = derived_pose * derived_motion
-
+            high=0.32,
+            min_value=0.05,
+        ) * motion_strict
+    
+        mouth = self._linear_falloff(
+            abs(yaw) + abs(centered_pitch) * 1.0 + abs(roll) * 0.35,
+            low=0.12,
+            high=0.48,
+            min_value=0.12,
+        ) * motion_soft
+    
+        brows = self._linear_falloff(
+            abs(yaw) * 0.7 + head_up_amount * 1.5 + abs(roll) * 0.25,
+            low=0.08,
+            high=0.34,
+            min_value=0.05,
+        ) * motion_soft
+    
+        nose_cheek = self._linear_falloff(
+            abs(yaw) + abs(centered_pitch) * 0.9 + abs(roll) * 0.4,
+            low=0.12,
+            high=0.48,
+            min_value=0.08,
+        ) * motion_soft
+    
+        derived = pose_soft * motion_soft
+        raw = pose_soft * motion_soft
+    
         return {
             "jaw_eye": float(max(0.0, min(1.0, jaw_eye))),
             "derived": float(max(0.0, min(1.0, derived))),
+            "mouth": float(max(0.0, min(1.0, mouth))),
+            "brows": float(max(0.0, min(1.0, brows))),
+            "eyes": float(max(0.0, min(1.0, eyes))),
+            "nose_cheek": float(max(0.0, min(1.0, nose_cheek))),
+            "raw": float(max(0.0, min(1.0, raw))),
+            "motion_strict": float(max(0.0, min(1.0, motion_strict))),
+            "motion_soft": float(max(0.0, min(1.0, motion_soft))),
+            "pose_strict": float(max(0.0, min(1.0, pose_strict))),
+            "pose_soft": float(max(0.0, min(1.0, pose_soft))),
             "pose_amount": float(pose_amount),
             "motion_amount": float(motion_amount),
-            "brows": float(max(0.0, min(1.0, brows))),
-            "mouth": float(max(0.0, min(1.0, mouth))),
             "yaw": float(yaw),
             "pitch": float(pitch),
             "roll": float(roll),
             "centered_pitch": float(centered_pitch),
             "neutral_pitch": float(self.neutral_pitch),
             "head_up": float(head_up_amount),
-            "head_down": float(head_down_amount)
+            "head_down": float(head_down_amount),
         }

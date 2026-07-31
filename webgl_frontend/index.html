@@ -164,6 +164,32 @@
     <button id="stopBtn">Stop Tracking + Unload Avatar</button>
 
     <hr />
+    <h4>Multi-view refinement optional</h4>
+    
+    <label>
+      <input id="multiViewEnableInput" type="checkbox" />
+      Use 5-photo Gaussian refinement
+    </label>
+    
+    <label>Front</label>
+    <input id="frontPhotoInput" type="file" accept="image/*" />
+    
+    <label>Right pose</label>
+    <input id="rightPhotoInput" type="file" accept="image/*" />
+    
+    <label>Left pose</label>
+    <input id="leftPhotoInput" type="file" accept="image/*" />
+    
+    <label>Up pose</label>
+    <input id="upPhotoInput" type="file" accept="image/*" />
+    
+    <label>Down pose</label>
+    <input id="downPhotoInput" type="file" accept="image/*" />
+    
+    <label>Refine iterations</label>
+    <input id="refineItersInput" type="number" value="700" min="1" max="3000" />
+    <hr />
+
 
     <h4>Debug Views</h4>
     

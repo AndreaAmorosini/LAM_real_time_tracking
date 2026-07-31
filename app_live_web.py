@@ -9,6 +9,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from lam.live.settings import settings
 from lam.live.live_motion import LiveMotionProvider
@@ -19,12 +20,23 @@ from lam.live.retargeting.landmark_derived_blendshapes import LandmarkDerivedBle
 from lam.live.retargeting.webgl_blendshapes import build_webgl_payload
 from lam.live.retargeting.head_pose_reliability import HeadPoseReliability
 from lam.live.source_preprocessor import LAMSourcePreprocessor
+from lam.live.refinement.multiview_gaussian_refiner import (
+    MultiViewGaussianRefiner,
+    load_multiview_target_from_processed_image    
+)
 from lam.live.oac_exporter import (
     export_oac_zip_from_live_renderer,
     compute_image_signature,
     avatar_id_from_signature,
     oac_zip_path_for_avatar,
     is_valid_oac_zip,
+)
+from lam.live.cleanup import (
+    cleanup_paths,
+    register_cleanup,
+    cleanup_by_id,
+    processed_export_dir_from_image,
+    oac_avatar_dir_from_zip
 )
 
 
@@ -241,6 +253,8 @@ async def export_oac_from_image(
             "zip_path": zip_path,
             "asset_url": f"{settings.oac_assets_route}/{zip_name}",
             "webgl_url": f"/?asset={settings.oac_assets_route}/{zip_name}",
+            "cleanup_on_stop": False,
+            "cleanup_id": None
         }
     
     raw_image_path = os.path.join(upload_dir, avatar_id + ext)
@@ -288,9 +302,18 @@ async def export_oac_from_image(
         lam_renderer,
         avatar_id,
         blender_path,
+        settings.oac_output_root
     )
 
     zip_name = os.path.basename(zip_path)
+
+    single_cleanup_paths = [
+        raw_image_path,
+        processed_export_dir_from_image(processed_source_image_path),
+        oac_avatar_dir_from_zip(zip_path)
+    ]
+
+    cleanup_paths(single_cleanup_paths)
 
     return {
         "avatar_id": avatar_id,
@@ -299,7 +322,196 @@ async def export_oac_from_image(
         "zip_path": zip_path,
         "asset_url": f"{settings.oac_assets_route}/{zip_name}",
         "webgl_url": f"/?asset={settings.oac_assets_route}/{zip_name}",
+        "cleanup_on_stop": False,
+        "cleanup_id": None
     }
+
+@app.post("/api/oac/export-multiview")
+async def export_oac_from_multiview_images(
+    front: UploadFile = File(...),
+    right: Optional[UploadFile] = File(None),
+    left: Optional[UploadFile] = File(None),
+    up: Optional[UploadFile] = File(None),
+    down: Optional[UploadFile] = File(None),
+    blender_path: Optional[str] = Form(None),
+    refine_iters: int = Form(700),
+):    
+    if not blender_path or blender_path.strip() in ["", "/path/to/blender"]:
+        blender_path = settings.blender_path
+
+    uploads = {
+        "front": front,
+        "right": right,
+        "left": left,
+        "up": up,
+        "down": down,
+    }
+
+    uploads = {k: v for k, v in uploads.items() if v is not None}
+
+    if "front" not in uploads:
+        raise RuntimeError("front image is required")
+
+    os.makedirs(settings.upload_dir, exist_ok=True)
+    os.makedirs(settings.oac_output_root, exist_ok=True)
+
+    image_bytes_by_role = {}
+    raw_paths = {}
+
+    for role, upload in uploads.items():
+        image_bytes = await upload.read()
+        image_bytes_by_role[role] = image_bytes
+
+        ext = os.path.splitext(upload.filename or "")[1].lower()
+        if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
+            ext = ".png"
+
+        # Prototype signature can be simple initially.
+        role_path = os.path.join(
+            settings.upload_dir,
+            f"multiview_{int(time.time())}_{role}{ext}",
+        )
+
+        with open(role_path, "wb") as f:
+            f.write(image_bytes)
+
+        raw_paths[role] = role_path
+
+    # TODO later: stable multi-image cache signature.
+    signature = compute_image_signature(b"".join(image_bytes_by_role[k] for k in sorted(image_bytes_by_role)))
+    avatar_id = avatar_id_from_signature("mv_" + signature)
+
+    preprocessor = LAMSourcePreprocessor(
+        output_dir=settings.tracking_output_dir,
+        detect_iris_landmarks=True,
+    )
+
+    processed_paths = {}
+    for role, raw_path in raw_paths.items():
+        processed_paths[role] = await asyncio.to_thread(
+            preprocessor.preprocess,
+            raw_path,
+        )
+
+    front_processed = processed_paths["front"]
+
+    lam_renderer = LAMLiveRenderer(
+        config_path=settings.lam_config_path,
+        model_name=settings.lam_model_name,
+        device=settings.lam_device,
+        render_size=settings.lam_render_size,
+    )
+
+    await asyncio.to_thread(lam_renderer.load_model)
+    await asyncio.to_thread(lam_renderer.prepare_source_image, front_processed)
+
+    source_betas = lam_renderer.get_source_betas_cpu()
+
+    class NeutralTracking:
+        detected = True
+        blendshapes = {}
+        facial_matrix = None
+
+    neutral_adapter = MediaPipeToFlameAdapter(device=settings.lam_device, expr_dim=100)
+    neutral_params = neutral_adapter.to_flame_params(
+        NeutralTracking(),
+        source_betas,
+    )
+
+    await asyncio.to_thread(lam_renderer.build_avatar_once, neutral_params)
+
+    role_weights = {
+        "front": settings.multiview_weight_front,
+        "left": settings.multiview_weight_left,
+        "right": settings.multiview_weight_right,
+        "up": settings.multiview_weight_up,
+        "down": settings.multiview_weight_down,
+    }
+    
+    targets = []
+    for role, processed_path in processed_paths.items():
+        target = load_multiview_target_from_processed_image(
+            role=role,
+            processed_image_path=processed_path,
+            render_size=settings.lam_render_size,
+            source_betas=source_betas,
+            weight=role_weights.get(role, 0.2)
+        )
+
+        targets.append(target)
+
+    refiner = MultiViewGaussianRefiner(
+        lam_renderer=lam_renderer,
+        targets=targets,
+        iters=max(
+            1,
+            min(
+                int(refine_iters or settings.multiview_refine_iters),
+                settings.multiview_refine_max_iters,
+            ),
+        ),
+    
+        lr_rgb=settings.multiview_refine_lr_rgb,
+        lr_opacity=settings.multiview_refine_lr_opacity,
+        lr_offset=settings.multiview_refine_lr_offset,
+        lr_scale=settings.multiview_refine_lr_scale,
+        lr_rotation=settings.multiview_refine_lr_rotation,
+    
+        lambda_mask=settings.multiview_refine_lambda_mask,
+        lambda_rgb_prior=settings.multiview_refine_lambda_rgb_prior,
+        lambda_offset=settings.multiview_refine_lambda_offset,
+        lambda_scale=settings.multiview_refine_lambda_scale,
+        lambda_opacity=settings.multiview_refine_lambda_opacity,
+    
+        max_offset_delta=settings.multiview_refine_max_offset_delta,
+        optimize_scale=settings.multiview_refine_optimize_scale,
+        optimize_rotation=settings.multiview_refine_optimize_rotation,
+    )
+
+    refined_gs = await asyncio.to_thread(refiner.optimize)
+
+    # Replace generated Gaussian avatar with refined one.
+    lam_renderer.gs_model_list[0] = refined_gs
+
+    zip_path = await asyncio.to_thread(
+        export_oac_zip_from_live_renderer,
+        lam_renderer,
+        avatar_id,
+        blender_path,
+        settings.oac_output_root,
+    )
+
+    zip_name = os.path.basename(zip_path)
+
+    intermediate_cleanup_paths = []
+    intermediate_cleanup_paths.extend(raw_paths.values())
+
+    for processed_path in processed_paths.values():
+        intermediate_cleanup_paths.append(
+            processed_export_dir_from_image(processed_path)
+        )
+
+    intermediate_cleanup_paths.append(oac_avatar_dir_from_zip(zip_path))
+    cleanup_paths(intermediate_cleanup_paths)
+
+    cleanup_id = register_cleanup(
+        paths=[zip_path],
+        kind="multiview_refined_oac_zip",
+    )
+
+    return {
+        "avatar_id": avatar_id,
+        "signature": signature,
+        "cached": False,
+        "refined": True,
+        "num_views": len(targets),
+        "zip_path": zip_path,
+        "asset_url": f"{settings.oac_assets_route}/{zip_name}",
+        "webgl_url": f"/?asset={settings.oac_assets_route}/{zip_name}",
+        "cleanup_on_stop": True,
+        "cleanup_id": cleanup_id
+    }
+
 
 @app.get("/api/client-config")
 async def client_config():
@@ -573,7 +785,6 @@ async def live_ws(websocket: WebSocket):
                         lam_renderer.render_frame_cached, flame_params
                     )
                     render_dt = time.time() - render_t0
-                    # print(f"[LAM render] render time: {render_dt:.3f}s")
             
                 except Exception as e:
                     print("[LAM render error]", repr(e))
@@ -690,6 +901,13 @@ async def live_ws(websocket: WebSocket):
 
         if lam_renderer is not None:
             pass
+
+class CleanupRequest(BaseModel):
+    cleanup_id: str
+
+@app.post("/api/cleanup/export")
+async def cleanup_export(req: CleanupRequest):
+    return cleanup_by_id(req.cleanup_id)
 
 app.mount(
     "/",

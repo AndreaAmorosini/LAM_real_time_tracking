@@ -246,26 +246,98 @@ class LandmarkDerivedBlendshapes:
         out["eyeWideRight"] = max(0.0, min(1.0, wide_r))
         
         # ------------------------------------------------------------------
-        # NOSE SNEER - local upper-lip-to-nose distance
+        # NOSE / NOSTRIL PROXY
         # ------------------------------------------------------------------
-
-        local_face_scale = self._local_face_scale(lms)
-
+        
+        local_face_scale = max(self._dist3(lms, 33, 263), 1e-6)
+        
         left_nose_y = self._mean_y(lms, [49, 98])
         right_nose_y = self._mean_y(lms, [279, 327])
-
+        
         left_upper_lip_y = self._mean_y(lms, [40, 80, 81])
         right_upper_lip_y = self._mean_y(lms, [270, 310, 311])
-
+        
         left_nose_lip_dist = (left_upper_lip_y - left_nose_y) / local_face_scale
         right_nose_lip_dist = (right_upper_lip_y - right_nose_y) / local_face_scale
-
-        out["noseSneerLeft"] = self._calibrated_delta(
-            "noseSneerLeft_lm", left_nose_lip_dist, False, gain=5.0
+        
+        # Classic sneer: upper lip/nose compression.
+        nose_sneer_l = self._calibrated_delta(
+            "noseSneerLeft_lm",
+            left_nose_lip_dist,
+            False,
+            gain=9.0,
         )
-        out["noseSneerRight"] = self._calibrated_delta(
-            "noseSneerRight_lm", right_nose_lip_dist, False, gain=5.0
+        
+        nose_sneer_r = self._calibrated_delta(
+            "noseSneerRight_lm",
+            right_nose_lip_dist,
+            False,
+            gain=9.0,
         )
+        
+        # Nostril wing width proxy.
+        # These points are approximate but useful for "nostril flare"-like motion.
+        left_nostril_width = self._dist3(lms, 49, 98) / local_face_scale
+        right_nostril_width = self._dist3(lms, 279, 327) / local_face_scale
+        
+        nostril_flare_l = self._calibrated_delta(
+            "nostrilFlareLeft_lm",
+            left_nostril_width,
+            True,
+            gain=12.0,
+        )
+        
+        nostril_flare_r = self._calibrated_delta(
+            "nostrilFlareRight_lm",
+            right_nostril_width,
+            True,
+            gain=12.0,
+        )
+        
+        # Nose base vertical proxy.
+        nose_base_y = self._mean_y(lms, [2, 94, 97, 326])
+        nose_tip_y = self._mean_y(lms, [1, 4])
+        nose_base_metric = (nose_base_y - nose_tip_y) / local_face_scale
+        
+        nose_lower = self._calibrated_delta(
+            "noseLower_lm",
+            nose_base_metric,
+            True,
+            gain=7.0,
+        )
+        
+        # Shape small movements to avoid idle twitch.
+        def shape_nose(v, deadzone=0.010, power=1.00):
+            if v < deadzone:
+                return 0.0
+            v = (v - deadzone) / max(1e-6, 1.0 - deadzone)
+            return max(0.0, min(1.0, v ** power))
+        
+        nose_sneer_l = shape_nose(nose_sneer_l, deadzone=0.008, power=0.90)
+        nose_sneer_r = shape_nose(nose_sneer_r, deadzone=0.008, power=0.90)
+        
+        nostril_flare_l = shape_nose(nostril_flare_l, deadzone=0.010, power=0.95)
+        nostril_flare_r = shape_nose(nostril_flare_r, deadzone=0.010, power=0.95)
+        
+        nose_lower = shape_nose(nose_lower, deadzone=0.012, power=1.00)
+        
+        # Map all lower-nose proxies into the available ARKit noseSneer channels.
+        out["noseSneerLeft"] = max(
+            nose_sneer_l,
+            nostril_flare_l * 0.85,
+            nose_lower * 0.55,
+        )
+        
+        out["noseSneerRight"] = max(
+            nose_sneer_r,
+            nostril_flare_r * 0.85,
+            nose_lower * 0.55,
+        )
+        
+        # Debug-only derived values.
+        out["nostrilFlareLeft"] = nostril_flare_l
+        out["nostrilFlareRight"] = nostril_flare_r
+        out["noseLower"] = nose_lower
 
         # ------------------------------------------------------------------
         # MOUTH / CHEEKS derived from landmarks
@@ -333,14 +405,14 @@ class LandmarkDerivedBlendshapes:
         
         # Quando la testa è chinata, il landmark-derived mouth_open tende a collassare.
         # Usiamo raw MediaPipe come assist, non come valore dominante.
-        if head_down_amount > 0.10:
+        if head_down_amount > 0.10 and raw_jaw > 0.08:
             head_down_t = max(0.0, min(1.0, (head_down_amount - 0.10) / 0.30))
         
-            raw_assist = self._speech_curve(raw_jaw * (1.4 + head_down_t * 0.9))
+            raw_assist = self._speech_curve(raw_jaw * (1.2 + head_down_t * 0.5))
         
             speech_open = max(
                 speech_open,
-                raw_assist * (0.45 + 0.35 * head_down_t),
+                raw_assist * (0.30 + 0.20 * head_down_t),
             )
         
         # Bigger jaw signal: slower and more conservative.
@@ -367,6 +439,18 @@ class LandmarkDerivedBlendshapes:
         
         out["speechOpen"] = max(0.0, min(1.0, speech_open))
         out["jawOpen"] = max(0.0, min(0.75, jaw))
+
+        raw_jaw_activity = 0.0
+        if raw_jaw > 0.045:
+            raw_jaw_activity = max(0.0, min(1.0, (raw_jaw - 0.045) / 0.45))
+        
+        mouth_activity = max(
+            speech_open,
+            raw_jaw_activity,
+            jaw,
+        )
+        
+        out["mouthActivity"] = max(0.0, min(1.0, mouth_activity))
 
         # Smile/frown: corners moving up/down relative to neutral.
         # y smaller = up, y larger = down.
@@ -422,9 +506,6 @@ class LandmarkDerivedBlendshapes:
         # ------------------------------------------------------------------
         # O: mouth is rounded AND visibly open -> mostly mouthFunnel.
         # U: mouth is rounded/narrow but not very open -> mostly mouthPucker.
-        #
-        # Note: true lip protrusion is hard from webcam landmarks, so this uses
-        # mouth width narrowing + mouth opening as an approximation.
         
         mouth_narrow = self._calibrated_delta(
             "mouthNarrow_lm",
@@ -534,6 +615,132 @@ class LandmarkDerivedBlendshapes:
         out["mouthLowerDownRight"] = max(lower_down_r, speech_open * 0.35)
 
         # ------------------------------------------------------------------
+        # EXTRA SPEECH / LIP DETAIL
+        # ------------------------------------------------------------------
+
+        activity_gate = self._smoothstep(0.035, 0.16, mouth_activity)
+        rest_gate = activity_gate
+
+        closed_gate = 1.0 - self._smoothstep(0.04, 0.18, mouth_activity)
+        
+        mouth_close = self._calibrated_delta(
+            "mouthClose_lm",
+            mouth_open,
+            False,
+            gain=3.0,
+        )
+        
+        # Mouth close should be strong only when jaw/speech opening is low.
+        mouth_close *= max(0.0, 1.0 - speech_open * 2.2)
+        mouth_close *= closed_gate
+        
+        out["mouthClose"] = max(0.0, min(0.75, mouth_close))
+        
+        # Press: lips closed/compressed, useful for M/B/P.
+        mouth_press = mouth_close * max(0.0, 1.0 - speech_open * 1.8)
+        mouth_press *= closed_gate
+        
+        out["mouthPressLeft"] = max(
+            out.get("mouthPressLeft", 0.0),
+            mouth_press * 0.65,
+        )
+        
+        out["mouthPressRight"] = max(
+            out.get("mouthPressRight", 0.0),
+            mouth_press * 0.65,
+        )
+        
+        # Shrug upper: upper lip rises toward nose.
+        upper_lip_raise = max(
+            out.get("mouthUpperUpLeft", 0.0),
+            out.get("mouthUpperUpRight", 0.0),
+        )
+        
+        out["mouthShrugUpper"] = max(
+            out.get("mouthShrugUpper", 0.0),
+            upper_lip_raise * 0.45,
+            out.get("noseSneerLeft", 0.0) * 0.18,
+            out.get("noseSneerRight", 0.0) * 0.18,
+        )
+        
+        # Shrug lower / roll lower: lower lip moves upward or mouth closes.
+        lower_lip_up_metric_l = -left_lower_lip_y / scale
+        lower_lip_up_metric_r = -right_lower_lip_y / scale
+        lower_lip_up_metric = 0.5 * (lower_lip_up_metric_l + lower_lip_up_metric_r)
+        
+        lower_lip_up = self._calibrated_delta(
+            "mouthShrugLower_lm",
+            lower_lip_up_metric,
+            True,
+            gain=3.5,
+        )
+        
+        out["mouthShrugLower"] = max(
+            out.get("mouthShrugLower", 0.0),
+            lower_lip_up * 0.50,
+            mouth_close * 0.25,
+        )
+        
+        out["mouthRollLower"] = max(
+            out.get("mouthRollLower", 0.0),
+            mouth_close * 0.30,
+            lower_lip_up * 0.35,
+        )
+        
+        out["mouthRollUpper"] = max(
+            out.get("mouthRollUpper", 0.0),
+            mouth_close * 0.25,
+            upper_lip_raise * 0.25,
+        )
+        
+        # Dimple: corners pulled laterally with relatively low smile.
+        stretch = max(
+            out.get("mouthStretchLeft", 0.0),
+            out.get("mouthStretchRight", 0.0),
+        )
+        
+        smile_l = out.get("mouthSmileLeft", 0.0)
+        smile_r = out.get("mouthSmileRight", 0.0)
+        
+        out["mouthDimpleLeft"] = max(
+            out.get("mouthDimpleLeft", 0.0),
+            stretch * 0.35 * max(0.0, 1.0 - smile_l * 0.6),
+        )
+        
+        out["mouthDimpleRight"] = max(
+            out.get("mouthDimpleRight", 0.0),
+            stretch * 0.35 * max(0.0, 1.0 - smile_r * 0.6),
+        )
+        
+        # Jaw left/right from mouth center lateral shift.
+        jaw_side_l = self._calibrated_delta(
+            "jawLeft_lm",
+            mouth_center_x / scale,
+            False,
+            gain=2.2,
+        )
+        
+        jaw_side_r = self._calibrated_delta(
+            "jawRight_lm",
+            mouth_center_x / scale,
+            True,
+            gain=2.2,
+        )
+        
+        out["jawLeft"] = max(out.get("jawLeft", 0.0), jaw_side_l * 0.45)
+        out["jawRight"] = max(out.get("jawRight", 0.0), jaw_side_r * 0.45)
+
+        out["mouthUpperUpLeft"] *= rest_gate
+        out["mouthUpperUpRight"] *= rest_gate
+        out["mouthLowerDownLeft"] *= rest_gate
+        out["mouthLowerDownRight"] *= rest_gate
+        out["mouthStretchLeft"] *= rest_gate
+        out["mouthStretchRight"] *= rest_gate
+        out["mouthFunnel"] *= rest_gate
+        out["mouthPucker"] *= rest_gate
+
+
+        # ------------------------------------------------------------------
         # CHEEK / ZYGOMA - local lower-eye-to-cheek compression
         # ------------------------------------------------------------------
 
@@ -590,6 +797,34 @@ class LandmarkDerivedBlendshapes:
             "mouthNarrow",
             "vowelO",
             "vowelU",
+            "mouthActivity"
+        }
+
+        mouth_detail_keys = {
+            "mouthClose",
+            "mouthPressLeft",
+            "mouthPressRight",
+            "mouthRollUpper",
+            "mouthRollLower",
+            "mouthShrugUpper",
+            "mouthShrugLower",
+            "mouthDimpleLeft",
+            "mouthDimpleRight",
+            "mouthFrownLeft",
+            "mouthFrownRight",
+            "mouthUpperUpLeft",
+            "mouthUpperUpRight",
+            "jawLeft",
+            "jawRight",
+        }
+
+
+        nose_keys = {
+            "noseSneerLeft",
+            "noseSneerRight",
+            "nostrilFlareLeft",
+            "nostrilFlareRight",
+            "noseLower",
         }
         
         for k in list(out.keys()):
@@ -599,6 +834,20 @@ class LandmarkDerivedBlendshapes:
                     out[k],
                     alpha_open=0.70,
                     alpha_close=0.78,
+                )
+            elif k in mouth_detail_keys:
+                out[k] = self._smooth_asymmetric(
+                    k,
+                    out[k],
+                    alpha_open=0.58,
+                    alpha_close=0.76,
+                )
+            elif k in nose_keys:
+                out[k] = self._smooth_asymmetric(
+                    k,
+                    out[k],
+                    alpha_open=0.62,
+                    alpha_close=0.80,
                 )
             else:
                 out[k] = self._smooth(k, out[k])
