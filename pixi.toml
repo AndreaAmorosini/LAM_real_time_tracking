@@ -83,6 +83,9 @@ check-blender = "thirdparties/blender/blender-4.0.2-linux-x64/blender --version"
 # Apps
 # ---------------------------------------------------------------------
 
+# export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+
+
 app-live-web = """
 bash -lc '
 export LAM_BLENDER_PATH="${LAM_BLENDER_PATH:-$PWD/thirdparties/blender/blender-4.0.2-linux-x64/blender}"
@@ -91,7 +94,7 @@ export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPATH:-}"
 export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
 export C_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${C_INCLUDE_PATH:-}"
 export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 PYTHONPATH=. python app_live_web.py
 '

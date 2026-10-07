@@ -151,6 +151,9 @@ const avatarEl = getRequiredElement<HTMLDivElement>("avatar");
 const statusEl = getRequiredElement<HTMLPreElement>("status");
 const photoInput = getRequiredElement<HTMLInputElement>("photoInput");
 const createBtn = getRequiredElement<HTMLButtonElement>("createBtn");
+const cameraBtn = getRequiredElement<HTMLButtonElement>("cameraBtn");
+const closeCameraBtn = getRequiredElement<HTMLButtonElement>("closeCameraBtn");
+const cameraPreview = getRequiredElement<HTMLVideoElement>("cameraPreview");
 const stopBtn = getRequiredElement<HTMLButtonElement>("stopBtn");
 const blenderPathInput = document.getElementById("blenderPathInput") as HTMLInputElement | null;
 const mappingModeSelect = getRequiredElement<HTMLSelectElement>("mappingModeSelect");
@@ -215,6 +218,8 @@ let renderer: any = null;
 let ws: WebSocket | null = null;
 let currentCleanupId: string | null = null;
 let currentCleanupOnStop: boolean = false;
+let cameraStream: MediaStream | null = null;
+let isCreatingAvatar = false;
 
 let runtimeConfig: RuntimeConfig = {
   webglWsFps: WEBGL_CONFIG.wsFps,
@@ -1068,29 +1073,144 @@ async function exportAvatarFromMultiviewPhotos(): Promise<ExportResponse> {
   return (await response.json()) as ExportResponse;
 }
 
+function updateCameraUi() {
+  const active = cameraStream !== null;
+
+  cameraBtn.textContent = active ? "Cattura foto" : "Attiva fotocamera";
+  cameraBtn.disabled = isCreatingAvatar;
+  closeCameraBtn.style.display = active ? "block" : "none";
+  closeCameraBtn.disabled = isCreatingAvatar;
+  cameraPreview.style.display = active ? "block" : "none";
+}
+
+function stopCamera() {
+  const stream = cameraStream;
+  cameraStream = null;
+
+  if (stream) {
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+  }
+
+  cameraPreview.pause();
+  cameraPreview.srcObject = null;
+  updateCameraUi();
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(
+      "Fotocamera non disponibile: apri la pagina su localhost o tramite HTTPS."
+    );
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: "user",
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+    },
+  });
+
+  try {
+    cameraStream = stream;
+    cameraPreview.srcObject = stream;
+
+    // Su alcuni browser play() può fallire, ad esempio per permessi
+    // revocati tra l'acquisizione dello stream e l'avvio del video.
+    await cameraPreview.play();
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.onended = () => {
+        if (cameraStream === stream) {
+          stopCamera();
+          setStatus("La fotocamera è stata disconnessa.");
+        }
+      };
+    }
+
+    updateCameraUi();
+    setStatus("Fotocamera attiva. Inquadra il volto e premi «Cattura foto».");
+  } catch (error) {
+    stopCamera();
+    throw error;
+  }
+}
+
+function captureCameraPhoto(): Promise<File> {
+  const width = cameraPreview.videoWidth;
+  const height = cameraPreview.videoHeight;
+
+  if (!cameraStream || width === 0 || height === 0) {
+    throw new Error(
+      "Il video non è ancora pronto. Attendi un istante e riprova."
+    );
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Impossibile acquisire il fotogramma.");
+  }
+
+  // L'anteprima è specchiata soltanto via CSS: il file conserva
+  // l'orientamento originale del fotogramma della webcam.
+  context.drawImage(cameraPreview, 0, 0, width, height);
+
+  return new Promise<File>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Impossibile convertire il fotogramma in JPEG."));
+          return;
+        }
+
+        resolve(
+          new File([blob], `lam-webcam-${Date.now()}.jpg`, {
+            type: "image/jpeg",
+            lastModified: Date.now(),
+          })
+        );
+      },
+      "image/jpeg",
+      0.92
+    );
+  });
+}
 
 stopBtn.onclick = () => {
+  stopCamera();
   void stopTrackingAndUnloadAvatar();
 };
 
+async function createAvatarFromInput(
+  file: File,
+  useMultiview: boolean
+): Promise<void> {
+  if (isCreatingAvatar) return;
 
-createBtn.onclick = async () => {
+  isCreatingAvatar = true;
+  createBtn.disabled = true;
+  updateCameraUi();
+
   try {
-    const file = photoInput.files?.[0];
-    if (!file) {
-      setStatus("Select a photo first.");
-      return;
-    }
-
-    createBtn.disabled = true;
-
-    const result = multiViewEnableInput?.checked
+    const result = useMultiview
       ? await exportAvatarFromMultiviewPhotos()
       : await exportAvatarFromPhoto(file);
 
+    // Pulisce un eventuale precedente export multiview temporaneo prima
+    // di sostituire l'ID di cleanup con quello del nuovo avatar.
+    await cleanupCurrentExport();
+
     currentCleanupOnStop = Boolean(result.cleanup_on_stop);
     currentCleanupId = result.cleanup_id || null;
-    
+
     setStatus(
       [
         result.cached ? "Avatar loaded from cache." : "Avatar export completed.",
@@ -1106,19 +1226,74 @@ createBtn.onclick = async () => {
     await initRenderer(result.asset_url);
     throttleSplatSort(2);
     connectWebSocket();
-  } catch (err) {
-    console.error(err);
-    setStatus(`ERROR:\n${String(err)}`);
+  } catch (error) {
+    console.error(error);
+    setStatus(`ERROR:\n${String(error)}`);
   } finally {
+    isCreatingAvatar = false;
     createBtn.disabled = false;
+    updateCameraUi();
+  }
+}
+
+createBtn.onclick = () => {
+  const file = photoInput.files?.[0];
+
+  if (!file) {
+    setStatus("Select a photo first.");
+    return;
+  }
+
+  // Se era aperta l'anteprima, il caricamento manuale usa comunque
+  // esplicitamente il file selezionato.
+  stopCamera();
+  void createAvatarFromInput(file, Boolean(multiViewEnableInput?.checked));
+};
+
+cameraBtn.onclick = async () => {
+  if (isCreatingAvatar) return;
+
+  if (!cameraStream) {
+    cameraBtn.disabled = true;
+
+    try {
+      await startCamera();
+    } catch (error) {
+      console.error(error);
+      setStatus(`ERROR:\n${String(error)}`);
+    } finally {
+      updateCameraUi();
+    }
+
+    return;
+  }
+
+  try {
+    const photo = await captureCameraPhoto();
+    stopCamera();
+
+    // La foto della webcam segue sempre il flusso single-photo.
+    // L'opzione multiview richiede file aggiuntivi e non viene usata qui.
+    await createAvatarFromInput(photo, false);
+  } catch (error) {
+    console.error(error);
+    setStatus(`ERROR:\n${String(error)}`);
   }
 };
+
+closeCameraBtn.onclick = () => {
+  stopCamera();
+  setStatus("Fotocamera chiusa.");
+};
+
+updateCameraUi();
 
 await loadRuntimeConfig();
 initDebugBlendshapeUi();
 initDebugBoneUi();
 
 window.addEventListener("beforeunload", () => {
+  stopCamera();
   if (ws) ws.close(1000, "page unload");
   if (renderer && typeof renderer.dispose === "function") renderer.dispose();
 

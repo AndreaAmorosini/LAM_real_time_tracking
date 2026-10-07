@@ -132,6 +132,20 @@
       max-height: none;
     }
     
+    #cameraPreview {
+      display: none;
+      width: 100%;
+      max-height: 300px;
+      margin-bottom: 10px;
+      background: #000;
+      object-fit: contain;
+      transform: scaleX(-1);
+    }
+
+    #closeCameraBtn {
+      display: none;
+    }
+    
   </style>
 </head>
 <body>
@@ -151,6 +165,10 @@
 
     <label>Photo</label>
     <input id="photoInput" type="file" accept="image/*" />
+
+    <video id="cameraPreview" autoplay muted playsinline aria-label="Live camera preview"></video>
+    <button id="cameraBtn" type="button">Attiva Fotocamera</button>
+    <button id="closeCameraBtn" type="button">Chiudi Fotocamera</button>
 
     <label>Tracking mapping mode</label>
     <select id="mappingModeSelect">
