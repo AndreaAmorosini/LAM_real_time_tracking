@@ -60,6 +60,7 @@ step "Blender 4.0.2 standalone" pixi run setup-blender
 step "FBX SDK Python" pixi run setup-fbx-sdk
 step "WebGL npm install" pixi run setup-webgl
 step "WebGL production build" pixi run webgl-build
+step "Studio production build" pixi run studio-build
 step "Doctor checks" pixi run doctor
 
 echo

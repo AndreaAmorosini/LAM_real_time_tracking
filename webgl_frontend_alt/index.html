@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LAM Studio | Live avatar</title>
+  <link rel="stylesheet" href="/src/studio.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">L</span><span>LAM <em>STUDIO</em></span></div>
+    <span class="top-label">LIVE AVATAR LAB <span class="pulse"></span></span>
+  </header>
+  <main class="layout">
+    <section class="stage" aria-label="Anteprima avatar">
+      <div id="avatar"></div>
+      <div class="stage-caption"><span>01 / LIVE CANVAS</span><strong>Il tuo avatar, in tempo reale.</strong><small>La webcam del computer backend guida l'animazione live.</small></div>
+      <div class="stage-tag">WEBGL + MEDIAPIPE</div>
+      <div id="landmarkDebugPanel" class="floating-panel"><strong>MediaPipe landmarks</strong><img id="landmarkDebugImage" alt="Landmark facciali" /></div>
+      <div id="flameDebugPanel" class="floating-panel flame"><strong>FLAME / blendshape</strong><pre id="flameDebugText"></pre></div>
+    </section>
+    <aside class="sidebar">
+      <div class="intro"><span class="eyebrow">WORKSPACE / 01</span><h1>Crea il tuo<br /><i>avatar live.</i></h1><p>Parti da una foto o cattura le pose con la webcam. Poi lascia che LAM costruisca il tuo avatar.</p></div>
+      <section class="card">
+        <div class="section-title"><span class="step">01</span><h2>Acquisizione</h2></div>
+        <div class="segmented" role="group" aria-label="Modalità acquisizione"><button id="singleModeBtn" type="button" class="selected">Foto singola</button><button id="multiModeBtn" type="button">Multi-view</button></div>
+        <label class="field-label" for="photoInput">Foto frontale</label><input id="photoInput" type="file" accept="image/*" />
+        <div id="multiFields" hidden>
+          <p class="hint">Carica i file manualmente oppure usa la guida webcam per catturare le cinque pose.</p>
+          <div class="file-grid"><label>Frontale<input id="frontPhotoInput" type="file" accept="image/*" /></label><label>Destra<input id="rightPhotoInput" type="file" accept="image/*" /></label><label>Sinistra<input id="leftPhotoInput" type="file" accept="image/*" /></label><label>Alto<input id="upPhotoInput" type="file" accept="image/*" /></label><label>Basso<input id="downPhotoInput" type="file" accept="image/*" /></label></div>
+          <label class="field-label" for="refineItersInput">Iterazioni di raffinamento</label><input id="refineItersInput" type="number" value="700" min="1" max="3000" />
+        </div>
+        <input id="multiViewEnableInput" type="checkbox" hidden />
+        <div class="actions"><button id="guideStartBtn" type="button" class="secondary">Usa webcam guidata</button><button id="createBtn" type="button" class="primary">Genera avatar <span>↗</span></button></div>
+        <video id="cameraPreview" autoplay muted playsinline hidden></video><button id="cameraBtn" type="button" hidden>Attiva fotocamera</button><button id="closeCameraBtn" type="button" hidden>Chiudi fotocamera</button>
+      </section>
+      <section class="card">
+        <div class="section-title"><span class="step">02</span><h2>Tracking live</h2></div>
+        <label class="field-label" for="mappingModeSelect">Mappatura espressioni</label><select id="mappingModeSelect"><option value="stable" selected>Stabile</option><option value="expressive">Espressiva</option><option value="raw">Raw / debug</option></select>
+        <button id="stopBtn" type="button" class="secondary stop">Ferma tracking e rimuovi avatar</button>
+      </section>
+      <details class="card advanced"><summary>Controlli avanzati <span>+</span></summary>
+        <label class="field-label" for="blenderPathInput">Percorso Blender opzionale</label><input id="blenderPathInput" type="text" placeholder="Predefinito del server" />
+        <label class="check"><input id="showLandmarkDebugInput" type="checkbox" /> Mostra landmarks</label><label class="check"><input id="showFlameDebugInput" type="checkbox" /> Mostra parametri FLAME</label>
+        <div class="divider"></div><label class="check"><input id="debugEnableInput" type="checkbox" /> Override espressione</label><label class="check"><input id="debugAdditiveInput" type="checkbox" checked /> Somma al tracking</label>
+        <label class="field-label" for="debugBlendshapeSelect">Blendshape</label><select id="debugBlendshapeSelect"></select><label class="field-label" for="debugBlendshapeValue">Intensità <span id="debugBlendshapeValueLabel">0.00</span></label><input id="debugBlendshapeValue" type="range" min="0" max="1" step="0.01" value="0" /><button id="debugResetBlendshapeBtn" type="button" class="secondary">Reset espressione</button>
+        <div class="divider"></div><label class="field-label" for="debugBoneSelect">Osso</label><select id="debugBoneSelect"></select>
+        <label class="field-label" for="debugBoneRotX">Rotazione X <span id="debugBoneRotXLabel">0.00</span></label><input id="debugBoneRotX" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+        <label class="field-label" for="debugBoneRotY">Rotazione Y <span id="debugBoneRotYLabel">0.00</span></label><input id="debugBoneRotY" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+        <label class="field-label" for="debugBoneRotZ">Rotazione Z <span id="debugBoneRotZLabel">0.00</span></label><input id="debugBoneRotZ" type="range" min="-1.5" max="1.5" step="0.01" value="0" /><button id="debugResetBoneBtn" type="button" class="secondary">Reset osso</button>
+      </details>
+      <details class="card status-card"><summary>Diagnostica <span>+</span></summary><pre id="status" role="status" aria-live="polite">Seleziona una foto per iniziare.</pre></details>
+      <p class="footer-note">Per il tracking live serve una webcam collegata al backend. La webcam del browser serve solo a scattare le foto.</p>
+    </aside>
+  </main>
+  <div id="captureDialog" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="captureTitle">
+    <div class="modal-card"><div class="modal-header"><div><span class="eyebrow">CAPTURE STUDIO</span><h2 id="captureTitle">Inquadra il volto</h2></div><button id="closeGuideBtn" type="button" class="icon-button" aria-label="Chiudi acquisizione">×</button></div>
+      <div class="camera-frame"><video id="guidedVideo" autoplay muted playsinline></video><div class="guide-overlay" aria-hidden="true"><div class="face-guide"></div><div id="guideDirection" class="direction">●</div></div><span id="poseCounter" class="camera-counter">01 / 01</span></div>
+      <p id="poseHint" class="pose-hint">Centra il viso nell'ovale e guarda davanti a te.</p><div id="poseStrip" class="pose-strip"></div><div class="modal-actions"><button id="retryPoseBtn" type="button" class="secondary">Rifai posa</button><button id="snapPoseBtn" type="button" class="primary">Scatta foto</button></div>
+    </div>
+  </div>
+  <div id="loadingDialog" class="modal loading" hidden role="status" aria-live="polite"><div class="loading-card"><div class="orb"><div class="spinner"></div></div><span class="eyebrow">LAM / GENERATION ENGINE</span><h2>Stiamo creando<br /><i>il tuo avatar.</i></h2><p id="loadingMessage">Preparazione delle immagini...</p><span class="loading-note">La generazione può richiedere alcuni minuti. Non chiudere la pagina.</span></div></div>
+  <script type="module" src="/src/studio.ts"></script>
+</body>
+</html>

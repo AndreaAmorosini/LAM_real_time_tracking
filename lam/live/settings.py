@@ -87,6 +87,33 @@ class LiveSettings(BaseSettings):
     rounding_mouthclose_range: float = Field(0.35, env="LAM_ROUNDING_MOUTHCLOSE_RANGE")
     rounding_mouthclose_scale: float = Field(0.75, env="LAM_ROUNDING_MOUTHCLOSE_SCALE")
 
+    # Multi-view refinement
+    multiview_refine_iters: int = Field(200, env="LAM_MULTIVIEW_REFINE_ITERS")
+    multiview_refine_lr_rgb: float = Field(3e-2, env="LAM_MULTIVIEW_REFINE_LR_RGB")
+    multiview_refine_lr_opacity: float = Field(1e-2, env="LAM_MULTIVIEW_REFINE_LR_OPACITY")
+    multiview_refine_lr_offset: float = Field(5e-3, env="LAM_MULTIVIEW_REFINE_LR_OFFSET")
+    multiview_refine_lr_scale: float = Field(2e-3, env="LAM_MULTIVIEW_REFINE_LR_SCALE")
+    multiview_refine_lambda_mask: float = Field(0.2, env="LAM_MULTIVIEW_REFINE_LAMBDA_MASK")
+    multiview_refine_lambda_offset: float = Field(5.0, env="LAM_MULTIVIEW_REFINE_LAMBDA_OFFSET")
+    multiview_refine_lambda_scale: float = Field(0.1, env="LAM_MULTIVIEW_REFINE_LAMBDA_SCALE")
+    multiview_refine_lambda_opacity: float = Field(0.01, env="LAM_MULTIVIEW_REFINE_LAMBDA_OPACITY")
+    multiview_refine_lr_rotation: float = Field(1e-4, env="LAM_MULTIVIEW_REFINE_LR_ROTATION")
+    multiview_refine_max_offset_delta: float = Field(0.0, env="LAM_MULTIVIEW_REFINE_MAX_OFFSET_DELTA")
+    multiview_refine_optimize_scale: bool = Field(False, env="LAM_MULTIVIEW_REFINE_OPTIMIZE_SCALE")
+    multiview_refine_optimize_rotation: bool = Field(False, env="LAM_MULTIVIEW_REFINE_OPTIMIZE_ROTATION")
+    multiview_refine_max_iters: int = Field(3000, env="LAM_MULTIVIEW_REFINE_MAX_ITERS")
+    multiview_refine_lambda_rgb_prior: float = Field(
+        10.0,
+        env="LAM_MULTIVIEW_REFINE_LAMBDA_RGB_PRIOR",
+    )
+    
+    multiview_weight_front: float = Field(1.0, env="LAM_MULTIVIEW_WEIGHT_FRONT")
+    multiview_weight_left: float = Field(0.25, env="LAM_MULTIVIEW_WEIGHT_LEFT")
+    multiview_weight_right: float = Field(0.25, env="LAM_MULTIVIEW_WEIGHT_RIGHT")
+    multiview_weight_up: float = Field(0.15, env="LAM_MULTIVIEW_WEIGHT_UP")
+    multiview_weight_down: float = Field(0.10, env="LAM_MULTIVIEW_WEIGHT_DOWN")
+
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
