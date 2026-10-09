@@ -1,9 +1,9 @@
 export const expressionPresets = {
   SMILE: {
-    mouthShrugLower: 0.279, mouthSmileLeft: 1.000, mouthSmileRight: 1.000,
+    mouthShrugLower: 0.279, mouthSmileLeft: 0.550, mouthSmileRight: 0.550,
     mouthUpperUpRight: 0.145, noseSneerLeft: 0.179, noseSneerRight: 0.179,
     mouthPressRight: 0.128, eyeWideLeft: 0.497, eyeWideRight: 0.497,
-    jawOpen: 0.050, mouthDimpleLeft: 0.704, mouthDimpleRight: 0.704,
+    jawOpen: 0.050, mouthDimpleLeft: 0.35, mouthDimpleRight: 0.35,
     browInnerUp: 0.503, browOuterUpLeft: 1.000, browOuterUpRight: 1.000,
     cheekSquintRight: 0.296,
   },

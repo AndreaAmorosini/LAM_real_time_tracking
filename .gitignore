@@ -25,6 +25,7 @@ __pycache__/
 node_modules/
 webgl_frontend/node_modules/
 webgl_frontend/dist/
+webgl_frontend_alt/dist/
 
 # Runtime outputs
 output/

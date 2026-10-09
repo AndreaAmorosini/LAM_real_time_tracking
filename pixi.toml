@@ -6,7 +6,7 @@ channels = ["conda-forge"]
 platforms = ["linux-64"]
 
 [dependencies]
-bash= "*"
+bash = "*"
 python = "3.10.*"
 pip = "*"
 setuptools = "*"
@@ -18,7 +18,7 @@ make = "*"
 ffmpeg = "*"
 zip = "*"
 unzip = "*"
-nodejs="*"
+nodejs = "*"
 wget = "*"
 tar = "*"
 xz = "*"
@@ -28,7 +28,7 @@ gcc_linux-64 = "11.*"
 gxx_linux-64 = "11.*"
 binutils_linux-64 = "*"
 
-# Toolkit CUDA locale dentro Pixi. Se preferisci usare /usr/local/cuda, puoi rimuovere queste due righe.
+# Toolkit CUDA locale dentro Pixi.
 cuda-version = "12.1.*"
 cuda-nvcc = "12.1.*"
 cuda-cudart-dev = "*"
@@ -66,6 +66,8 @@ setup-fbx-sdk = "bash scripts/live-install/setup/setup-fbx-sdk.sh"
 setup-webgl = "npm --prefix webgl_frontend install"
 webgl-build = "npm --prefix webgl_frontend run build"
 webgl-dev = "npm --prefix webgl_frontend run dev --host 127.0.0.1 --port 5173"
+studio-build = "./webgl_frontend/node_modules/.bin/vite build --config webgl_frontend_alt/vite.config.ts"
+studio-dev = "./webgl_frontend/node_modules/.bin/vite --config webgl_frontend_alt/vite.config.ts"
 
 # ---------------------------------------------------------------------
 # Diagnostics
@@ -83,8 +85,7 @@ check-blender = "thirdparties/blender/blender-4.0.2-linux-x64/blender --version"
 # Apps
 # ---------------------------------------------------------------------
 
-# export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
-
+app-lam = "bash scripts/pixi-run-app.sh"
 
 app-live-web = """
 bash -lc '
@@ -97,6 +98,20 @@ export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 PYTHONPATH=. python app_live_web.py
+'
+"""
+
+app-live-studio = """
+bash -lc '
+export LAM_BLENDER_PATH="${LAM_BLENDER_PATH:-$PWD/thirdparties/blender/blender-4.0.2-linux-x64/blender}"
+export CUDA_HOME="$CONDA_PREFIX"
+export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPATH:-}"
+export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
+export C_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include:${C_INCLUDE_PATH:-}"
+export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
+PYTHONPATH=. python app_live_studio.py
 '
 """
 
