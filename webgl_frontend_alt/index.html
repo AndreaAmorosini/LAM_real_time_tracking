@@ -39,6 +39,19 @@
         <label class="field-label" for="mappingModeSelect">Mappatura espressioni</label><select id="mappingModeSelect"><option value="stable" selected>Stabile</option><option value="expressive">Espressiva</option><option value="raw">Raw / debug</option></select>
         <button id="stopBtn" type="button" class="secondary stop">Ferma tracking e rimuovi avatar</button>
       </section>
+      <section id="presetsPanel" class="card presets-card" hidden aria-label="Espressioni avatar">
+        <div class="section-title"><span class="step">03</span><h2>Espressioni</h2></div>
+        <p class="hint">Scegli un'espressione per sospendere il tracking MediaPipe. Riprendi live quando vuoi.</p>
+        <div class="preset-grid">
+          <button type="button" data-preset="SMILE">Smile</button>
+          <button type="button" data-preset="PROHIBITED">Prohibited</button>
+          <button type="button" data-preset="CONCERNED">Concerned</button>
+          <button type="button" data-preset="THOUGHTFUL">Thoughtful</button>
+          <button type="button" data-preset="DISGUSTED">Disgusted</button>
+          <button type="button" data-preset="WINK">Wink</button>
+        </div>
+        <button id="resumeLiveBtn" type="button" class="secondary resume-live" hidden>Riprendi tracking live</button>
+      </section>
       <details class="card advanced"><summary>Controlli avanzati <span>+</span></summary>
         <label class="field-label" for="blenderPathInput">Percorso Blender opzionale</label><input id="blenderPathInput" type="text" placeholder="Predefinito del server" />
         <label class="check"><input id="showLandmarkDebugInput" type="checkbox" /> Mostra landmarks</label><label class="check"><input id="showFlameDebugInput" type="checkbox" /> Mostra parametri FLAME</label>

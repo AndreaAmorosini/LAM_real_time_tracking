@@ -1,5 +1,9 @@
 // The existing renderer and tracking controls are reused without changing their implementation.
-import "../../webgl_frontend/src/main.ts";
+import { activatePreset, resetPreset, resumeLive } from "./preset-bridge";
+import { expressionPresets } from "./expression-presets";
+
+// Install the Studio-only renderer/socket adapter before the shared UI module runs.
+await import("../../webgl_frontend/src/main.ts");
 
 const get = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const singleMode = get<HTMLButtonElement>("singleModeBtn");
@@ -16,6 +20,8 @@ const captureDialog = get<HTMLDivElement>("captureDialog");
 const loadingDialog = get<HTMLDivElement>("loadingDialog");
 const status = get<HTMLPreElement>("status");
 const video = get<HTMLVideoElement>("guidedVideo");
+const presetsPanel = get<HTMLElement>("presetsPanel");
+const resumeLiveBtn = get<HTMLButtonElement>("resumeLiveBtn");
 
 const poses = [
   { name: "Frontale", id: "frontPhotoInput", hint: "Guarda davanti a te e centra il volto nell'ovale.", symbol: "●" },
@@ -167,9 +173,44 @@ createBtn.addEventListener("click", () => {
 }, { capture: true });
 // The old camera control stays available to the shared module, but is not shown in this UI.
 cameraBtn.addEventListener("click", startLoading);
+function clearPresetSelection() {
+  resumeLiveBtn.hidden = true;
+  presetsPanel.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach(button => {
+    button.classList.remove("selected");
+    button.setAttribute("aria-pressed", "false");
+  });
+}
+
+presetsPanel.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach(button => {
+  button.onclick = () => {
+    const name = button.dataset.preset as keyof typeof expressionPresets;
+    if (!activatePreset(expressionPresets[name])) return;
+    presetsPanel.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach(item => {
+      item.classList.toggle("selected", item === button);
+      item.setAttribute("aria-pressed", String(item === button));
+    });
+    resumeLiveBtn.hidden = false;
+    status.textContent = `${name}: tracking MediaPipe sospeso, espressione applicata all'avatar.`;
+  };
+  button.setAttribute("aria-pressed", "false");
+});
+resumeLiveBtn.onclick = () => {
+  resumeLive();
+  clearPresetSelection();
+  status.textContent = "Riconnessione al tracking MediaPipe...";
+};
+get<HTMLButtonElement>("stopBtn").addEventListener("click", () => {
+  presetsPanel.hidden = true;
+  clearPresetSelection();
+  resetPreset();
+}, { capture: true });
 new MutationObserver(() => {
-  if (!loadingTimer) return;
   const text = status.textContent || "";
-  if (/^ERROR:|^Stopped\.|Renderer ready|WebSocket connected|^WebSocket closed/.test(text) || /Avatar reveal completed/.test(text)) stopLoading();
+  if (text.includes("Renderer ready")) presetsPanel.hidden = false;
+  if (text.startsWith("Loading WebGL avatar") || text.startsWith("Stopped.")) {
+    presetsPanel.hidden = true;
+    clearPresetSelection();
+  }
+  if (loadingTimer && (/^ERROR:|^Stopped\.|Renderer ready|WebSocket connected|^WebSocket closed/.test(text) || /Avatar reveal completed/.test(text))) stopLoading();
 }).observe(status, { childList: true, characterData: true, subtree: true });
 window.addEventListener("beforeunload", closeCapture);

@@ -50,6 +50,11 @@ input[type=checkbox] { accent-color: #b5d295; }
 .primary { display: flex; justify-content: center; gap: 12px; align-items: center; background: #b5d295; border-color: #b5d295; color: #1a251c; }
 .secondary { background: #2a342c; color: #dae5d4; }
 .stop { width: 100%; margin-top: 17px; }
+.preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.preset-grid button { min-height: 48px; padding: 10px 6px; background: #151d17; color: #d8e5d2; border: 1px solid #475948; border-radius: 7px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.preset-grid button:hover { border-color: #b5d295; }
+.preset-grid button.selected { color: #17231a; background: #b5d295; border-color: #b5d295; }
+.resume-live { width: 100%; margin-top: 12px; }
 .advanced summary, .status-card summary { display: flex; justify-content: space-between; cursor: pointer; font: 700 13px Manrope, sans-serif; list-style: none; }
 .advanced summary::-webkit-details-marker, .status-card summary::-webkit-details-marker { display: none; }
 .advanced[open] summary, .status-card[open] summary { margin-bottom: 16px; }
