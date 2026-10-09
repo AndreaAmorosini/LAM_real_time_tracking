@@ -53,6 +53,14 @@
       <p class="footer-note">Per il tracking live serve una webcam collegata al backend. La webcam del browser serve solo a scattare le foto.</p>
     </aside>
   </main>
+  <div id="privacyDialog" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="privacyTitle" aria-describedby="privacyDescription">
+    <div class="modal-card privacy-card">
+      <div class="modal-header"><div><span class="eyebrow">PRIVACY / WEBCAM</span><h2 id="privacyTitle">Prima di attivare la webcam</h2></div><button id="closePrivacyBtn" type="button" class="icon-button" aria-label="Chiudi informativa">×</button></div>
+      <p id="privacyDescription">Il video della webcam del browser viene usato solo per l'anteprima e per scattare le foto: l'app non registra né conserva il flusso video. Le foto scattate vengono inviate al backend per creare l'avatar; l'avatar generato verra' eliminato alla fine dell'esperienza. Il tracking live usa invece la webcam collegata al backend.</p>
+      <label class="privacy-consent"><input id="privacyConsentInput" type="checkbox" /> <span>Ho letto e acconsento all'uso della webcam e al trattamento delle foto come descritto sopra.</span></label>
+      <div class="modal-actions"><button id="cancelPrivacyBtn" type="button" class="secondary">Annulla</button><button id="continuePrivacyBtn" type="button" class="primary" disabled>Continua alla webcam</button></div>
+    </div>
+  </div>
   <div id="captureDialog" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="captureTitle">
     <div class="modal-card"><div class="modal-header"><div><span class="eyebrow">CAPTURE STUDIO</span><h2 id="captureTitle">Inquadra il volto</h2></div><button id="closeGuideBtn" type="button" class="icon-button" aria-label="Chiudi acquisizione">×</button></div>
       <div class="camera-frame"><video id="guidedVideo" autoplay muted playsinline></video><div class="guide-overlay" aria-hidden="true"><div class="face-guide"></div><div id="guideDirection" class="direction">●</div></div><span id="poseCounter" class="camera-counter">01 / 01</span></div>

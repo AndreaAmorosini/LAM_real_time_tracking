@@ -63,6 +63,10 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 monospace; 
 .floating-panel.flame { top: 30px; bottom: auto; max-height: 60%; overflow: auto; }
 .modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: #09110dd9; backdrop-filter: blur(12px); }
 .modal-card { width: min(790px, 100%); padding: 25px; background: #202923; border: 1px solid #526650; border-radius: 16px; box-shadow: 0 30px 90px #0008; }
+.privacy-card { width: min(540px, 100%); }
+.privacy-card p { color: #c8d3c3; font-size: 14px; line-height: 1.7; }
+.privacy-consent { display: flex; align-items: flex-start; gap: 12px; padding: 16px; margin: 22px 0; background: #151d17; border: 1px solid #526650; border-radius: 8px; font-size: 13px; line-height: 1.5; cursor: pointer; }
+.privacy-consent input { flex: none; margin-top: 3px; }
 .modal-header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 17px; }
 .modal-header h2 { font: 700 26px Manrope, sans-serif; margin: 7px 0 0; }
 .icon-button { background: #344138; color: white; border: 0; border-radius: 6px; font-size: 25px; width: 36px; height: 36px; }

@@ -9,6 +9,9 @@ const multiFields = get<HTMLDivElement>("multiFields");
 const photoInput = get<HTMLInputElement>("photoInput");
 const createBtn = get<HTMLButtonElement>("createBtn");
 const cameraBtn = get<HTMLButtonElement>("cameraBtn");
+const privacyDialog = get<HTMLDivElement>("privacyDialog");
+const privacyConsent = get<HTMLInputElement>("privacyConsentInput");
+const continuePrivacy = get<HTMLButtonElement>("continuePrivacyBtn");
 const captureDialog = get<HTMLDivElement>("captureDialog");
 const loadingDialog = get<HTMLDivElement>("loadingDialog");
 const status = get<HTMLPreElement>("status");
@@ -80,7 +83,25 @@ get<HTMLInputElement>("frontPhotoInput").addEventListener("change", event => {
 });
 get<HTMLButtonElement>("closeGuideBtn").onclick = closeCapture;
 get<HTMLButtonElement>("retryPoseBtn").onclick = () => { index = Math.max(0, index - 1); updatePose(); };
-get<HTMLButtonElement>("guideStartBtn").onclick = async () => {
+function closePrivacy() {
+  privacyDialog.hidden = true;
+  privacyConsent.checked = false;
+  continuePrivacy.disabled = true;
+  get<HTMLButtonElement>("guideStartBtn").focus();
+}
+
+get<HTMLButtonElement>("closePrivacyBtn").onclick = closePrivacy;
+get<HTMLButtonElement>("cancelPrivacyBtn").onclick = closePrivacy;
+privacyConsent.onchange = () => { continuePrivacy.disabled = !privacyConsent.checked; };
+get<HTMLButtonElement>("guideStartBtn").onclick = () => {
+  privacyConsent.checked = false;
+  continuePrivacy.disabled = true;
+  privacyDialog.hidden = false;
+  privacyConsent.focus();
+};
+continuePrivacy.onclick = async () => {
+  if (!privacyConsent.checked) return;
+  closePrivacy();
   if (!navigator.mediaDevices?.getUserMedia) {
     status.textContent = "La webcam richiede localhost o una connessione HTTPS.";
     return;
